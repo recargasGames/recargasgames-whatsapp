@@ -4,21 +4,25 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
-const qrcodeTerminal = require("qrcode-terminal");
 const QRCode = require("qrcode");
+const qrcodeTerminal = require("qrcode-terminal");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_WHATSAPP = process.env.ADMIN_WHATSAPP || "584228242411";
+const ADMIN_WHATSAPP = process.env.ADMIN_WHATSAPP || "";
 const WEB_API_KEY = process.env.WEB_API_KEY || "";
-const WEB_URL = process.env.WEB_URL || "https://recargasgames.shop";
+const WEB_URL =
+  process.env.WEB_URL || "https://recargasgames.shop";
 
-const ARCHIVO_PEDIDOS = path.join(__dirname, "pedidos.json");
+const PEDIDOS_FILE = path.join(__dirname, "pedidos.json");
+
+let ultimoQR = null;
+let whatsappListo = false;
 
 const precios = {
   "110": 770,
@@ -27,467 +31,172 @@ const precios = {
   "572": 3850,
   "1166": 7150,
   "2398": 14100,
-  "6160": 35900
+  "6160": 35900,
 };
 
-const sesiones = new Map();
-
-let ultimoQR = null;
-let whatsappListo = false;
+const estados = {
+  pendientes: "pendientes",
+  pagado: "pagado",
+  procesando: "procesando",
+  completado: "completado",
+  cancelado: "cancelado",
+};
 
 function cargarPedidos() {
   try {
-    if (!fs.existsSync(ARCHIVO_PEDIDOS)) {
-      fs.writeFileSync(ARCHIVO_PEDIDOS, "[]", "utf8");
+    if (!fs.existsSync(PEDIDOS_FILE)) {
+      fs.writeFileSync(PEDIDOS_FILE, "[]");
+      return [];
     }
 
-    const contenido = fs.readFileSync(ARCHIVO_PEDIDOS, "utf8");
-    return JSON.parse(contenido || "[]");
+    return JSON.parse(fs.readFileSync(PEDIDOS_FILE, "utf8"));
   } catch (error) {
-    console.error("Error cargando pedidos:", error);
+    console.error("Error leyendo pedidos:", error.message);
     return [];
   }
 }
 
 function guardarPedidos(pedidos) {
   fs.writeFileSync(
-    ARCHIVO_PEDIDOS,
+    PEDIDOS_FILE,
     JSON.stringify(pedidos, null, 2),
     "utf8"
   );
 }
 
 function crearNumeroPedido() {
-  const ahora = new Date();
+  const fecha = new Date();
+  const parteFecha =
+    fecha.getFullYear().toString() +
+    String(fecha.getMonth() + 1).padStart(2, "0") +
+    String(fecha.getDate()).padStart(2, "0");
 
-  const fecha = ahora
-    .toISOString()
-    .replace(/\D/g, "")
-    .slice(0, 14);
+  const parteAleatoria = Math.floor(1000 + Math.random() * 9000);
 
-  const aleatorio = Math.floor(1000 + Math.random() * 9000);
-
-  return `RG-${fecha}-${aleatorio}`;
+  return `RG-${parteFecha}-${parteAleatoria}`;
 }
 
-function normalizarWhatsApp(numero) {
-  if (!numero) return "";
+function limpiarNumeroWhatsApp(numero) {
+  return numero.replace(/\D/g, "");
+}
 
-  let limpio = String(numero)
-    .trim()
-    .replace("@c.us", "")
-    .replace(/\s+/g, "")
-    .replace(/-/g, "")
-    .replace(/\(/g, "")
-    .replace(/\)/g, "");
+function formatoWhatsApp(numero) {
+  const limpio = limpiarNumeroWhatsApp(numero);
 
-  if (limpio.startsWith("+")) {
-    limpio = limpio.substring(1);
-  }
-
-  if (limpio.startsWith("00")) {
-    limpio = limpio.substring(2);
+  if (limpio.startsWith("58")) {
+    return `${limpio}@c.us`;
   }
 
   if (limpio.startsWith("0")) {
-    limpio = `58${limpio.substring(1)}`;
+    return `58${limpio.substring(1)}@c.us`;
   }
 
-  return limpio;
+  return `${limpio}@c.us`;
 }
 
-function numeroWhatsApp(numero) {
-  return `${normalizarWhatsApp(numero)}@c.us`;
-}
-
-function esAdmin(numero) {
-  return normalizarWhatsApp(numero) === normalizarWhatsApp(ADMIN_WHATSAPP);
-}
-
-function verificarApiKey(req, res, next) {
+function esApiAutorizada(req) {
   if (!WEB_API_KEY) {
-    return res.status(500).json({
-      ok: false,
-      error: "WEB_API_KEY no configurada en Railway"
-    });
+    return true;
   }
 
-  const recibida = req.headers["x-api-key"];
-
-  if (!recibida || recibida !== WEB_API_KEY) {
-    return res.status(401).json({
-      ok: false,
-      error: "API key inválida"
-    });
-  }
-
-  next();
+  return req.headers["x-api-key"] === WEB_API_KEY;
 }
 
-function formatoBs(cantidad) {
-  return `${Number(cantidad).toLocaleString("es-VE")} Bs`;
+function responderNoAutorizado(res) {
+  return res.status(401).json({
+    ok: false,
+    error: "API key inválida o ausente",
+  });
 }
 
-function listaPrecios() {
-  return [
-    "🎮 *PRECIOS FREE FIRE*",
-    "",
-    `💎 110 diamantes: ${formatoBs(precios["110"])}`,
-    `💎 220 diamantes: ${formatoBs(precios["220"])}`,
-    `💎 341 diamantes: ${formatoBs(precios["341"])}`,
-    `💎 572 diamantes: ${formatoBs(precios["572"])}`,
-    `💎 1166 diamantes: ${formatoBs(precios["1166"])}`,
-    `💎 2398 diamantes: ${formatoBs(precios["2398"])}`,
-    `💎 6160 diamantes: ${formatoBs(precios["6160"])}`,
-    "",
-    `🌐 ${WEB_URL}`,
-    "",
-    "Escribe la cantidad de diamantes que deseas.",
-    "Ejemplo: 110",
-    "",
-    "Escribe *0* para ver los datos de Pago Móvil."
-  ].join("\n");
-}
-
-function datosPago() {
-  return [
-    "💳 *DATOS DE PAGO MÓVIL*",
-    "",
-    "🏦 Banco: Banco de Venezuela",
-    "🔢 Código: 0102",
-    "🪪 Cédula: V-32824869",
-    "📱 Teléfono: 04228242411",
-    "",
-    "Realiza el pago y envía el número de referencia.",
-    "Después te solicitaremos tu ID de Free Fire."
-  ].join("\n");
-}
-
-function bienvenida() {
-  return [
-    "🎮 *Bienvenido a RECARGASGAMES*",
-    "",
-    "🕐 Horario de atención:",
-    "7:00 AM a 11:00 PM",
-    "",
-    "¿Quieres consultar los precios de Free Fire?",
-    "",
-    "👉 Escribe *1*"
-  ].join("\n");
-}
-
-function mensajePedidoCreado(pedido) {
-  return [
-    "✅ *PEDIDO RECIBIDO*",
-    "",
-    `🧾 Pedido: ${pedido.numero}`,
-    `💎 Producto: ${pedido.producto} diamantes`,
-    `💰 Total: ${formatoBs(pedido.precio)}`,
-    `🎮 ID Free Fire: ${pedido.idFreeFire}`,
-    `🔢 Referencia: ${pedido.referencia}`,
-    "",
-    "⏳ Tu pedido quedó pendiente de verificación.",
-    "Te avisaremos por este medio cuando sea procesado.",
-    "",
-    "Gracias por comprar en RECARGASGAMES."
-  ].join("\n");
-}
-
-async function enviarMensaje(numero, texto) {
+async function enviarWhatsApp(numero, mensaje) {
   try {
     if (!whatsappListo) {
-      console.log("WhatsApp todavía no está listo.");
+      console.log("WhatsApp todavía no está conectado.");
       return false;
     }
 
-    await client.sendMessage(numeroWhatsApp(numero), texto);
+    await client.sendMessage(formatoWhatsApp(numero), mensaje);
     return true;
   } catch (error) {
-    console.error("Error enviando mensaje:", error);
+    console.error("Error enviando WhatsApp:", error.message);
     return false;
   }
 }
 
-async function notificarAdministrador(pedido) {
-  const mensaje = [
-    "📥 *NUEVO PEDIDO RECARGASGAMES*",
-    "",
-    `🧾 Pedido: ${pedido.numero}`,
-    `👤 Cliente: ${pedido.cliente}`,
-    `📱 WhatsApp: ${pedido.whatsapp}`,
-    `💎 Producto: ${pedido.producto} diamantes`,
-    `💰 Precio: ${formatoBs(pedido.precio)}`,
-    `🔢 Referencia: ${pedido.referencia}`,
-    `🎮 ID Free Fire: ${pedido.idFreeFire}`,
-    "",
-    "Estado: PENDIENTE"
-  ].join("\n");
+async function notificarAdministrador(mensaje) {
+  if (!ADMIN_WHATSAPP) {
+    console.log("ADMIN_WHATSAPP no está configurado.");
+    return;
+  }
 
-  await enviarMensaje(ADMIN_WHATSAPP, mensaje);
+  await enviarWhatsApp(ADMIN_WHATSAPP, mensaje);
 }
 
-const client = new Client({
-  authStrategy: new LocalAuth({
-    clientId: "recargasgames"
-  }),
-
-  puppeteer: {
-    headless: true,
-
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
-      "--disable-extensions",
-      "--disable-background-networking",
-      "--disable-default-apps",
-      "--disable-sync",
-      "--no-first-run",
-      "--no-zygote"
-    ]
-  }
-});
-
-client.on("qr", async (qr) => {
-  console.log("Nuevo código QR generado.");
-
-  qrcodeTerminal.generate(qr, {
-    small: true
-  });
-
-  try {
-    ultimoQR = await QRCode.toDataURL(qr);
-    console.log("QR disponible en la ruta /qr");
-  } catch (error) {
-    console.error("No se pudo convertir el QR en imagen:", error);
-  }
-});
-
-client.on("authenticated", () => {
-  console.log("WhatsApp autenticado correctamente.");
-});
-
-client.on("auth_failure", (mensaje) => {
-  console.error("Falló la autenticación de WhatsApp:", mensaje);
-});
-
-client.on("ready", () => {
-  whatsappListo = true;
-  ultimoQR = null;
-  console.log("✅ WhatsApp conectado y listo.");
-});
-
-client.on("disconnected", (razon) => {
-  whatsappListo = false;
-  console.log("WhatsApp desconectado:", razon);
-});
-
-client.on("loading_screen", (porcentaje, mensaje) => {
-  console.log(`WhatsApp cargando: ${porcentaje}% - ${mensaje}`);
-});
-
-client.on("change_state", (estado) => {
-  console.log("Estado de WhatsApp:", estado);
-});
-
-client.on("message", async (mensaje) => {
-  try {
-    if (!mensaje.from || mensaje.from.endsWith("@g.us")) {
-      return;
-    }
-
-    const numero = mensaje.from.replace("@c.us", "");
-    const texto = String(mensaje.body || "")
-      .trim()
-      .toLowerCase();
-
-    if (!texto) return;
-
-    if (esAdmin(numero)) {
-      if (texto === "estado bot") {
-        await mensaje.reply(
-          whatsappListo
-            ? "✅ El bot está conectado."
-            : "⚠️ El bot todavía no está conectado."
-        );
-        return;
-      }
-    }
-
-    let sesion = sesiones.get(numero);
-
-    if (!sesion) {
-      sesiones.set(numero, {
-        estado: "menu",
-        producto: null,
-        precio: null,
-        referencia: null
-      });
-
-      await mensaje.reply(bienvenida());
-      return;
-    }
-
-    if (texto === "cancelar" || texto === "reiniciar" || texto === "menu") {
-      sesiones.set(numero, {
-        estado: "menu",
-        producto: null,
-        precio: null,
-        referencia: null
-      });
-
-      await mensaje.reply(bienvenida());
-      return;
-    }
-
-    if (sesion.estado === "menu") {
-      if (texto === "1") {
-        sesion.estado = "producto";
-        sesiones.set(numero, sesion);
-        await mensaje.reply(listaPrecios());
-        return;
-      }
-
-      await mensaje.reply(
-        "Escribe *1* para consultar los precios de Free Fire."
-      );
-      return;
-    }
-
-    if (sesion.estado === "producto") {
-      if (texto === "0") {
-        await mensaje.reply(datosPago());
-        return;
-      }
-
-      if (!precios[texto]) {
-        await mensaje.reply(
-          "Cantidad no válida. Escribe una de estas cantidades: 110, 220, 341, 572, 1166, 2398 o 6160."
-        );
-        return;
-      }
-
-      sesion.producto = texto;
-      sesion.precio = precios[texto];
-      sesion.estado = "referencia";
-
-      sesiones.set(numero, sesion);
-
-      await mensaje.reply(
-        [
-          `💎 Seleccionaste ${texto} diamantes.`,
-          `💰 Total: ${formatoBs(precios[texto])}`,
-          "",
-          datosPago(),
-          "",
-          "Cuando realices el pago, envía el número de referencia."
-        ].join("\n")
-      );
-
-      return;
-    }
-
-    if (sesion.estado === "referencia") {
-      if (texto === "0") {
-        await mensaje.reply(datosPago());
-        return;
-      }
-
-      if (texto.length < 4) {
-        await mensaje.reply(
-          "La referencia parece incompleta. Envíame el número de referencia del pago."
-        );
-        return;
-      }
-
-      sesion.referencia = mensaje.body.trim();
-      sesion.estado = "id";
-      sesiones.set(numero, sesion);
-
-      await mensaje.reply(
-        "🎮 Ahora envíame tu ID de jugador de Free Fire."
-      );
-
-      return;
-    }
-
-    if (sesion.estado === "id") {
-      const idFreeFire = mensaje.body.trim();
-
-      if (!/^\d{5,20}$/.test(idFreeFire)) {
-        await mensaje.reply(
-          "El ID de Free Fire debe contener solamente números. Inténtalo nuevamente."
-        );
-        return;
-      }
-
-      const pedidos = cargarPedidos();
-
-      const pedido = {
-        numero: crearNumeroPedido(),
-        fecha: new Date().toISOString(),
-        cliente: mensaje.pushname || "Cliente",
-        whatsapp: numero,
-        producto: sesion.producto,
-        precio: sesion.precio,
-        referencia: sesion.referencia,
-        idFreeFire,
-        estado: "pendiente",
-        origen: "whatsapp"
-      };
-
-      pedidos.push(pedido);
-      guardarPedidos(pedidos);
-
-      await mensaje.reply(mensajePedidoCreado(pedido));
-      await notificarAdministrador(pedido);
-
-      sesiones.delete(numero);
-      return;
-    }
-  } catch (error) {
-    console.error("Error procesando mensaje:", error);
-
-    try {
-      await mensaje.reply(
-        "⚠️ Ocurrió un error procesando tu solicitud. Escribe *menu* para comenzar nuevamente."
-      );
-    } catch (errorRespuesta) {
-      console.error("No se pudo enviar el mensaje de error:", errorRespuesta);
-    }
-  }
-});
+/*
+|--------------------------------------------------------------------------
+| RUTAS WEB
+|--------------------------------------------------------------------------
+*/
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    servicio: "RECARGASGAMES WhatsApp Bot",
-    whatsapp: whatsappListo ? "conectado" : "iniciando",
-    qr: "/qr",
-    hora: new Date().toISOString()
-  });
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>RECARGASGAMES - Bot WhatsApp</title>
+      <style>
+        body {
+          margin: 0;
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: #080808;
+          color: white;
+          font-family: Arial, sans-serif;
+          text-align: center;
+        }
+
+        .card {
+          width: 90%;
+          max-width: 500px;
+          padding: 30px;
+          border-radius: 20px;
+          background: #151515;
+          box-shadow: 0 0 30px rgba(255, 190, 0, .15);
+        }
+
+        h1 {
+          color: #ffc400;
+        }
+
+        a {
+          display: inline-block;
+          margin-top: 20px;
+          padding: 14px 22px;
+          border-radius: 10px;
+          background: #ffc400;
+          color: #000;
+          text-decoration: none;
+          font-weight: bold;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>RECARGASGAMES</h1>
+        <p>Servidor del bot de WhatsApp funcionando.</p>
+        <a href="/qr">Abrir código QR</a>
+      </div>
+    </body>
+    </html>
+  `);
 });
 
 app.get("/qr", (req, res) => {
-  if (whatsappListo) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html lang="es">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>WhatsApp conectado</title>
-      </head>
-      <body style="font-family:Arial;text-align:center;padding:40px;">
-        <h1>✅ WhatsApp conectado</h1>
-        <p>El bot de RECARGASGAMES ya está vinculado.</p>
-      </body>
-      </html>
-    `);
-  }
-
   if (!ultimoQR) {
     return res.send(`
       <!DOCTYPE html>
@@ -496,11 +205,39 @@ app.get("/qr", (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta http-equiv="refresh" content="5">
-        <title>Esperando QR</title>
+        <title>QR WhatsApp - RECARGASGAMES</title>
+        <style>
+          body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #080808;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+          }
+
+          .card {
+            width: 90%;
+            max-width: 450px;
+            padding: 30px;
+            border-radius: 20px;
+            background: #151515;
+          }
+
+          h2 {
+            color: #ffc400;
+          }
+        </style>
       </head>
-      <body style="font-family:Arial;text-align:center;padding:40px;">
-        <h1>⏳ Generando código QR</h1>
-        <p>Espera unos segundos. Esta página se actualizará automáticamente.</p>
+      <body>
+        <div class="card">
+          <h2>Esperando código QR...</h2>
+          <p>El bot está generando el código.</p>
+          <p>Esta página se actualizará automáticamente.</p>
+        </div>
       </body>
       </html>
     `);
@@ -513,65 +250,50 @@ app.get("/qr", (req, res) => {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <meta http-equiv="refresh" content="20">
-      <title>QR WhatsApp - RECARGASGAMES</title>
+      <title>Vincular WhatsApp</title>
       <style>
-        * {
-          box-sizing: border-box;
-        }
-
         body {
           margin: 0;
           min-height: 100vh;
           display: flex;
-          justify-content: center;
           align-items: center;
-          padding: 20px;
-          background: #101010;
+          justify-content: center;
+          background: #080808;
           color: white;
           font-family: Arial, sans-serif;
           text-align: center;
         }
 
         .card {
-          width: 100%;
-          max-width: 480px;
+          width: 90%;
+          max-width: 450px;
           padding: 25px;
           border-radius: 20px;
-          background: #1b1b1b;
-          box-shadow: 0 0 30px rgba(0, 0, 0, .4);
+          background: #151515;
         }
 
-        h1 {
-          font-size: 24px;
-          margin-top: 0;
+        h2 {
+          color: #ffc400;
         }
 
         img {
           display: block;
           width: 100%;
-          max-width: 420px;
-          height: auto;
+          max-width: 350px;
           margin: 20px auto;
-          padding: 14px;
           background: white;
-          border-radius: 14px;
+          border-radius: 12px;
         }
 
         p {
-          color: #cccccc;
           line-height: 1.5;
-        }
-
-        .warning {
-          color: #ffcc66;
-          font-size: 13px;
         }
       </style>
     </head>
     <body>
       <div class="card">
-        <h1>🎮 RECARGASGAMES</h1>
-        <p>Escanea este código QR con WhatsApp.</p>
+        <h2>Vincular WhatsApp</h2>
+        <p>Escanea este código desde tu teléfono.</p>
 
         <img src="${ultimoQR}" alt="Código QR de WhatsApp">
 
@@ -580,9 +302,7 @@ app.get("/qr", (req, res) => {
           Vincular un dispositivo
         </p>
 
-        <p class="warning">
-          No compartas esta página mientras el QR esté activo.
-        </p>
+        <small>El código se actualiza automáticamente.</small>
       </div>
     </body>
     </html>
@@ -592,23 +312,25 @@ app.get("/qr", (req, res) => {
 app.get("/api/estado", (req, res) => {
   res.json({
     ok: true,
-    whatsapp: whatsappListo ? "conectado" : "desconectado",
+    whatsappListo,
     qrDisponible: Boolean(ultimoQR),
-    hora: new Date().toISOString()
+    servidor: "activo",
+    web: WEB_URL,
   });
 });
 
-app.get("/api/pedidos", verificarApiKey, (req, res) => {
-  const pedidos = cargarPedidos();
+app.get("/api/pedidos", (req, res) => {
+  if (!esApiAutorizada(req)) {
+    return responderNoAutorizado(res);
+  }
 
   res.json({
     ok: true,
-    total: pedidos.length,
-    pedidos
+    pedidos: cargarPedidos(),
   });
 });
 
-app.get("/api/pedido/:numero", verificarApiKey, (req, res) => {
+app.get("/api/pedido/:numero", (req, res) => {
   const pedidos = cargarPedidos();
 
   const pedido = pedidos.find(
@@ -618,133 +340,366 @@ app.get("/api/pedido/:numero", verificarApiKey, (req, res) => {
   if (!pedido) {
     return res.status(404).json({
       ok: false,
-      error: "Pedido no encontrado"
+      error: "Pedido no encontrado",
     });
   }
 
   res.json({
     ok: true,
-    pedido
+    pedido,
   });
 });
 
-app.post("/api/pedido-web", verificarApiKey, async (req, res) => {
-  try {
-    const {
-      whatsapp,
-      numeroPedido,
-      producto,
-      precio,
-      idFreeFire,
-      pin,
-      codigos,
-      estadoPago
-    } = req.body;
-
-    if (!whatsapp || !numeroPedido || !producto) {
-      return res.status(400).json({
-        ok: false,
-        error: "Faltan datos del pedido web"
-      });
-    }
-
-    const cliente = normalizarWhatsApp(whatsapp);
-
-    const mensaje = [
-      "🎮 *RECARGASGAMES - PEDIDO WEB*",
-      "",
-      `🧾 Pedido: ${numeroPedido}`,
-      `💎 Producto: ${producto}`,
-      precio ? `💰 Precio: ${precio}` : "",
-      idFreeFire ? `🎮 ID Free Fire: ${idFreeFire}` : "",
-      "",
-      estadoPago ? `💳 Estado del pago: ${estadoPago}` : "",
-      pin ? `🔐 PIN: ${pin}` : "",
-      codigos ? `🎟️ Códigos: ${codigos}` : "",
-      "",
-      "Gracias por comprar en RECARGASGAMES."
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    const enviado = await enviarMensaje(cliente, mensaje);
-
-    res.json({
-      ok: enviado,
-      enviado,
-      numeroPedido
-    });
-  } catch (error) {
-    console.error("Error en pedido web:", error);
-
-    res.status(500).json({
-      ok: false,
-      error: "No se pudo enviar el pedido web"
-    });
+app.post("/api/pedido-web", async (req, res) => {
+  if (!esApiAutorizada(req)) {
+    return responderNoAutorizado(res);
   }
-});
 
-app.post("/api/alerta-web", verificarApiKey, async (req, res) => {
   try {
     const {
-      numeroPedido,
-      whatsapp,
+      cliente,
+      telefono,
       producto,
       monto,
       referencia,
-      motivo
+      idJugador,
+      origen = "web",
     } = req.body;
 
-    const mensaje = [
-      "⚠️ *ALERTA DE PAGO WEB*",
-      "",
-      `🧾 Pedido: ${numeroPedido || "No indicado"}`,
-      `📱 Cliente: ${whatsapp || "No indicado"}`,
-      `💎 Producto: ${producto || "No indicado"}`,
-      `💰 Monto: ${monto || "No indicado"}`,
-      `🔢 Referencia: ${referencia || "No indicada"}`,
-      `📌 Motivo: ${motivo || "Pago no confirmado"}`,
-      "",
-      "Revisar manualmente."
-    ].join("\n");
+    if (
+      !telefono ||
+      !producto ||
+      !monto ||
+      !referencia ||
+      !idJugador
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Faltan datos: teléfono, producto, monto, referencia o ID de jugador",
+      });
+    }
 
-    const enviado = await enviarMensaje(ADMIN_WHATSAPP, mensaje);
+    const pedido = {
+      numero: crearNumeroPedido(),
+      cliente: cliente || "Cliente web",
+      telefono,
+      producto,
+      monto,
+      referencia,
+      idJugador,
+      origen,
+      estado: estados.pendientes,
+      fecha: new Date().toISOString(),
+    };
 
-    res.json({
-      ok: enviado,
-      enviado
+    const pedidos = cargarPedidos();
+    pedidos.push(pedido);
+    guardarPedidos(pedidos);
+
+    await notificarAdministrador(`
+🟡 NUEVO PEDIDO WEB
+
+📦 Pedido: ${pedido.numero}
+👤 Cliente: ${pedido.cliente}
+📱 Teléfono: ${pedido.telefono}
+🎮 Producto: ${pedido.producto}
+💰 Monto: ${pedido.monto} Bs
+🧾 Referencia: ${pedido.referencia}
+🆔 ID Free Fire: ${pedido.idJugador}
+
+Estado: PENDIENTE
+`);
+
+    return res.json({
+      ok: true,
+      mensaje: "Pedido creado correctamente",
+      pedido,
     });
   } catch (error) {
-    console.error("Error enviando alerta web:", error);
+    console.error("Error creando pedido web:", error.message);
 
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
-      error: "No se pudo enviar la alerta"
+      error: "No se pudo crear el pedido",
     });
   }
 });
 
-app.use((error, req, res, next) => {
-  console.error("Error general:", error);
+app.post("/api/alerta-web", async (req, res) => {
+  if (!esApiAutorizada(req)) {
+    return responderNoAutorizado(res);
+  }
 
-  res.status(500).json({
-    ok: false,
-    error: "Error interno del servidor"
+  const { mensaje } = req.body;
+
+  if (!mensaje) {
+    return res.status(400).json({
+      ok: false,
+      error: "Falta el mensaje",
+    });
+  }
+
+  await notificarAdministrador(`🔔 ALERTA WEB\n\n${mensaje}`);
+
+  res.json({
+    ok: true,
+    mensaje: "Alerta enviada",
   });
 });
 
+/*
+|--------------------------------------------------------------------------
+| BOT DE WHATSAPP
+|--------------------------------------------------------------------------
+*/
+
+const client = new Client({
+  authStrategy: new LocalAuth({
+    clientId: "recargasgames",
+  }),
+
+  puppeteer: {
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-extensions",
+    ],
+  },
+});
+
+client.on("qr", async (qr) => {
+  try {
+    ultimoQR = await QRCode.toDataURL(qr);
+
+    console.log("QR generado.");
+    console.log("Abre la ruta /qr para escanearlo.");
+
+    qrcodeTerminal.generate(qr, {
+      small: true,
+    });
+  } catch (error) {
+    console.error("Error generando QR:", error.message);
+  }
+});
+
+client.on("ready", () => {
+  whatsappListo = true;
+  ultimoQR = null;
+
+  console.log("WhatsApp conectado correctamente.");
+});
+
+client.on("authenticated", () => {
+  console.log("WhatsApp autenticado.");
+});
+
+client.on("auth_failure", (mensaje) => {
+  whatsappListo = false;
+  console.error("Error de autenticación:", mensaje);
+});
+
+client.on("disconnected", (motivo) => {
+  whatsappListo = false;
+  console.log("WhatsApp desconectado:", motivo);
+});
+
+client.on("message", async (message) => {
+  try {
+    if (message.fromMe) return;
+
+    const texto = message.body.trim();
+    const textoMinuscula = texto.toLowerCase();
+    const telefono = message.from.replace("@c.us", "");
+
+    if (
+      textoMinuscula === "hola" ||
+      textoMinuscula === "buenas" ||
+      textoMinuscula === "buenos dias" ||
+      textoMinuscula === "buenas tardes" ||
+      textoMinuscula === "buenas noches"
+    ) {
+      await message.reply(`
+🎮 ¡Hola! Bienvenido a RECARGASGAMES.
+
+Realizamos recargas de Free Fire y otros productos digitales.
+
+Escribe:
+
+1️⃣ Ver precios
+0️⃣ Ver datos de Pago Móvil
+`);
+      return;
+    }
+
+    if (texto === "1") {
+      await message.reply(`
+🔥 PRECIOS FREE FIRE 🔥
+
+💎 110 diamantes: 770 Bs
+💎 220 diamantes: 1.540 Bs
+💎 341 diamantes: 2.300 Bs
+💎 572 diamantes: 3.850 Bs
+💎 1166 diamantes: 7.150 Bs
+💎 2398 diamantes: 14.100 Bs
+💎 6160 diamantes: 35.900 Bs
+
+Escribe directamente la cantidad que deseas comprar.
+
+Ejemplo: 110
+`);
+      return;
+    }
+
+    if (texto === "0") {
+      await message.reply(`
+💳 DATOS DE PAGO MÓVIL
+
+Banco: Banco de Venezuela
+Código: 0102
+Cédula: V-32824869
+Teléfono: 04228242411
+
+Después de pagar, envía:
+
+1. Número de referencia
+2. ID de jugador de Free Fire
+3. Cantidad de diamantes
+`);
+      return;
+    }
+
+    if (precios[texto]) {
+      await message.reply(`
+💎 Seleccionaste ${texto} diamantes.
+
+💰 Total: ${precios[texto].toLocaleString("es-VE")} Bs
+
+Realiza el Pago Móvil con estos datos:
+
+Banco: Banco de Venezuela
+Código: 0102
+Cédula: V-32824869
+Teléfono: 04228242411
+
+Después envía el número de referencia del pago.
+`);
+      return;
+    }
+
+    if (/^\d{6,20}$/.test(texto)) {
+      await message.reply(`
+🧾 Referencia recibida.
+
+Ahora envía tu ID de jugador de Free Fire.
+
+Puedes encontrarlo dentro del juego, en tu perfil.
+`);
+
+      await notificarAdministrador(`
+🧾 POSIBLE REFERENCIA DE PAGO
+
+📱 Cliente: ${telefono}
+🧾 Referencia: ${texto}
+
+El cliente debe enviar ahora su ID de jugador.
+`);
+
+      return;
+    }
+
+    if (/^\d{7,15}$/.test(texto)) {
+      const pedido = {
+        numero: crearNumeroPedido(),
+        cliente: "Cliente WhatsApp",
+        telefono,
+        producto: "Free Fire",
+        monto: "Por confirmar",
+        referencia: "Por confirmar",
+        idJugador: texto,
+        origen: "whatsapp",
+        estado: estados.pendientes,
+        fecha: new Date().toISOString(),
+      };
+
+      const pedidos = cargarPedidos();
+      pedidos.push(pedido);
+      guardarPedidos(pedidos);
+
+      await message.reply(`
+✅ Datos recibidos.
+
+📦 Número de pedido: ${pedido.numero}
+
+Tu pedido quedó registrado y será revisado por nuestro equipo.
+
+Estado: PENDIENTE
+`);
+
+      await notificarAdministrador(`
+🟡 NUEVO PEDIDO POR WHATSAPP
+
+📦 Pedido: ${pedido.numero}
+📱 Cliente: ${telefono}
+🆔 ID Free Fire: ${pedido.idJugador}
+
+El pedido requiere revisión del pago.
+`);
+
+      return;
+    }
+
+    if (
+      textoMinuscula.includes("precio") ||
+      textoMinuscula.includes("precios") ||
+      textoMinuscula.includes("diamantes")
+    ) {
+      await message.reply(`
+🔥 PRECIOS FREE FIRE 🔥
+
+110 diamantes: 770 Bs
+220 diamantes: 1.540 Bs
+341 diamantes: 2.300 Bs
+572 diamantes: 3.850 Bs
+1166 diamantes: 7.150 Bs
+2398 diamantes: 14.100 Bs
+6160 diamantes: 35.900 Bs
+
+Escribe la cantidad que deseas.
+`);
+      return;
+    }
+
+    await message.reply(`
+No entendí tu mensaje.
+
+Escribe:
+
+1️⃣ Para ver los precios
+0️⃣ Para ver los datos de Pago Móvil
+`);
+  } catch (error) {
+    console.error("Error procesando mensaje:", error.message);
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| INICIO
+|--------------------------------------------------------------------------
+*/
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor ejecutándose en el puerto ${PORT}`);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("Excepción no controlada:", error);
-});
-
-process.on("unhandledRejection", (error) => {
-  console.error("Promesa rechazada:", error);
+  console.log(`Ruta QR: /qr`);
 });
 
 client.initialize().catch((error) => {
-  console.error("No se pudo iniciar WhatsApp:", error);
+  console.error("Error iniciando WhatsApp:", error);
 });
