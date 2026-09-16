@@ -38,7 +38,6 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     libxss1 \
     libxtst6 \
-    lsb-release \
     wget \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
