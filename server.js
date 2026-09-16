@@ -2,7 +2,12 @@ const express = require("express");
 const cors = require("cors");
 const qrcode = require("qrcode");
 const qrcodeTerminal = require("qrcode-terminal");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const {
+  Client,
+  LocalAuth,
+  List,
+  Buttons,
+} = require("whatsapp-web.js");
 
 const app = express();
 
@@ -11,16 +16,23 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===============================
+// =====================================
 // CONFIGURACIÓN
-// ===============================
+// =====================================
 
-const NUMERO_ADMIN = "584264696162@c.us";
-// Cambia este número por el número real del administrador.
+const NOMBRE_BOT = "RECARGAS GAMES";
+const NUMERO_ADMIN = "584228242411@c.us";
 
-// ===============================
-// PRECIOS
-// ===============================
+const datosPago = {
+  banco: "Banco de Venezuela",
+  codigo: "0102",
+  telefono: "0422-8242411",
+  cedula: "32824869",
+};
+
+// =====================================
+// PRECIOS FREE FIRE
+// =====================================
 
 const precios = {
   "110": 770,
@@ -32,9 +44,40 @@ const precios = {
   "6160": 35900,
 };
 
-// ===============================
-// ESTADO DEL BOT
-// ===============================
+// =====================================
+// HOTPACKS MÓVILES
+// =====================================
+// Sustituye estos ejemplos por tus hotpacks reales.
+
+const hotpacks = {
+  movistar: [
+    {
+      id: "movistar_1",
+      title: "Hotpack Movistar 1",
+      description: "Consultar precio",
+    },
+  ],
+
+  digitel: [
+    {
+      id: "digitel_1",
+      title: "Hotpack Digitel 1",
+      description: "Consultar precio",
+    },
+  ],
+
+  movilnet: [
+    {
+      id: "movilnet_1",
+      title: "Hotpack Movilnet 1",
+      description: "Consultar precio",
+    },
+  ],
+};
+
+// =====================================
+// ESTADOS
+// =====================================
 
 let qrActual = null;
 let whatsappListo = false;
@@ -42,9 +85,9 @@ let whatsappListo = false;
 const usuarios = new Map();
 const mensajesProcesados = new Set();
 
-// ===============================
+// =====================================
 // CLIENTE DE WHATSAPP
-// ===============================
+// =====================================
 
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -64,26 +107,26 @@ const client = new Client({
   },
 });
 
-// ===============================
+// =====================================
 // VERSIÓN INSTALADA
-// ===============================
+// =====================================
 
 try {
   const packageInfo = require("whatsapp-web.js/package.json");
   console.log("Versión whatsapp-web.js:", packageInfo.version);
 } catch (error) {
-  console.log("No se pudo comprobar la versión de whatsapp-web.js");
+  console.log("No se pudo comprobar la versión instalada.");
 }
 
-// ===============================
-// EVENTOS DE WHATSAPP
-// ===============================
+// =====================================
+// EVENTOS WHATSAPP
+// =====================================
 
 client.on("qr", (qr) => {
-  console.log("Nuevo código QR generado.");
-
   qrActual = qr;
   whatsappListo = false;
+
+  console.log("Nuevo código QR generado.");
 
   qrcodeTerminal.generate(qr, {
     small: true,
@@ -101,9 +144,9 @@ client.on("ready", () => {
   console.log("WhatsApp conectado correctamente.");
 });
 
-client.on("auth_failure", (mensaje) => {
+client.on("auth_failure", (error) => {
   whatsappListo = false;
-  console.error("Error de autenticación:", mensaje);
+  console.error("Error de autenticación:", error);
 });
 
 client.on("disconnected", (motivo) => {
@@ -111,9 +154,9 @@ client.on("disconnected", (motivo) => {
   console.log("WhatsApp desconectado:", motivo);
 });
 
-// ===============================
-// FUNCIONES
-// ===============================
+// =====================================
+// FUNCIONES GENERALES
+// =====================================
 
 function obtenerUsuario(numero) {
   if (!usuarios.has(numero)) {
@@ -128,41 +171,173 @@ function obtenerUsuario(numero) {
   return usuarios.get(numero);
 }
 
-function enviarMensaje(numero, texto) {
-  return client.sendMessage(numero, texto);
+async function enviarMensaje(numero, texto) {
+  try {
+    await client.sendMessage(numero, texto);
+  } catch (error) {
+    console.error("Error enviando mensaje:", error.message);
+  }
 }
 
-function menuPrincipal() {
-  return `
-🎮 *RECARGASGAMES* 🎮
+async function enviarLista(numero, texto, filas) {
+  try {
+    const lista = new List(
+      texto,
+      "Abrir RECARGAS",
+      [
+        {
+          title: "Opciones disponibles",
+          rows: filas,
+        },
+      ],
+      NOMBRE_BOT,
+      "Selecciona una opción"
+    );
 
-Selecciona una opción:
+    await client.sendMessage(numero, lista);
+  } catch (error) {
+    console.error("Error enviando lista:", error.message);
 
-1️⃣ Recargas Free Fire
-2️⃣ Hablar con soporte
+    const respaldo = filas
+      .map((fila, indice) => `${indice + 1}️⃣ ${fila.title}`)
+      .join("\n");
 
-Responde con el número de la opción.
-`;
+    await enviarMensaje(numero, `${texto}\n\n${respaldo}`);
+  }
 }
 
-function menuFreeFire() {
-  return `
-💎 *FREE FIRE*
+async function enviarBotones(numero, texto, botones) {
+  try {
+    const mensaje = new Buttons(
+      texto,
+      botones,
+      NOMBRE_BOT,
+      "Selecciona una opción"
+    );
 
-Selecciona tu recarga:
+    await client.sendMessage(numero, mensaje);
+  } catch (error) {
+    console.error("Error enviando botones:", error.message);
 
-💎 110 → 770 Bs
-💎 220 → 1540 Bs
-💎 341 → 2300 Bs
-💎 572 → 3850 Bs
-💎 1166 → 7150 Bs
-💎 2398 → 14100 Bs
-💎 6160 → 35900 Bs
+    const respaldo = botones
+      .map((boton, indice) => `${indice + 1}️⃣ ${boton}`)
+      .join("\n");
 
-Responde con la cantidad.
-Ejemplo: *110*
-`;
+    await enviarMensaje(numero, `${texto}\n\n${respaldo}`);
+  }
 }
+
+// =====================================
+// MENÚ PRINCIPAL
+// =====================================
+
+async function mostrarMenuPrincipal(numero) {
+  await enviarLista(
+    numero,
+    `
+🎮 *RECARGAS GAMES*
+
+Bienvenido a nuestra tienda de recargas y productos digitales.
+
+¿Qué deseas consultar?
+`,
+    [
+      {
+        id: "freefire",
+        title: "💎 Precios de Free Fire",
+        description: "Consulta diamantes y pases",
+      },
+      {
+        id: "hotpacks",
+        title: "📱 Hotpacks móviles",
+        description: "Consulta paquetes móviles",
+      },
+      {
+        id: "soporte",
+        title: "👨‍💻 Hablar con soporte",
+        description: "Contacta con un agente",
+      },
+    ]
+  );
+}
+
+// =====================================
+// MENÚ FREE FIRE
+// =====================================
+
+async function mostrarMenuFreeFire(numero) {
+  await enviarLista(
+    numero,
+    `
+💎 *PRECIOS FREE FIRE*
+
+Selecciona la cantidad que deseas consultar.
+`,
+    Object.keys(precios).map((cantidad) => ({
+      id: `ff_${cantidad}`,
+      title: `💎 ${cantidad} → ${precios[cantidad]} Bs`,
+      description: "Consultar esta recarga",
+    }))
+  );
+}
+
+// =====================================
+// MENÚ HOTPACKS
+// =====================================
+
+async function mostrarMenuHotpacks(numero) {
+  await enviarLista(
+    numero,
+    `
+📱 *HOTPACKS MÓVILES*
+
+Selecciona tu operadora.
+`,
+    [
+      {
+        id: "movistar",
+        title: "📱 Movistar",
+        description: "Consultar hotpacks Movistar",
+      },
+      {
+        id: "digitel",
+        title: "📱 Digitel",
+        description: "Consultar hotpacks Digitel",
+      },
+      {
+        id: "movilnet",
+        title: "📱 Movilnet",
+        description: "Consultar hotpacks Movilnet",
+      },
+    ]
+  );
+}
+
+async function mostrarHotpacksOperadora(numero, operadora) {
+  const lista = hotpacks[operadora] || [];
+
+  if (lista.length === 0) {
+    await enviarMensaje(
+      numero,
+      `📱 No hay hotpacks disponibles para ${operadora.toUpperCase()}.`
+    );
+    return;
+  }
+
+  await enviarLista(
+    numero,
+    `
+📱 *HOTPACKS ${operadora.toUpperCase()}*
+
+Selecciona un paquete.
+`,
+    lista
+  );
+}
+
+// =====================================
+// DATOS DE PAGO
+// =====================================
 
 function mensajePago(producto) {
   return `
@@ -171,8 +346,12 @@ function mensajePago(producto) {
 Cantidad: ${producto}
 Total: ${precios[producto]} Bs
 
-🏦 *Banco de Venezuela*
-📱 Pago Móvil
+🏦 *Datos para el pago móvil*
+
+Banco: ${datosPago.banco}
+Código: ${datosPago.codigo}
+Teléfono: ${datosPago.telefono}
+Cédula: ${datosPago.cedula}
 
 Realiza el pago y envía los últimos 4 dígitos de la referencia bancaria.
 `;
@@ -186,9 +365,69 @@ function idJugadorValido(texto) {
   return /^\d{7,20}$/.test(texto);
 }
 
-// ===============================
+// =====================================
+// PROCESAR OPCIONES
+// =====================================
+
+async function procesarOpcion(numero, opcion, usuario) {
+  if (opcion === "freefire") {
+    usuario.estado = "seleccion_producto";
+    await mostrarMenuFreeFire(numero);
+    return;
+  }
+
+  if (opcion === "hotpacks") {
+    await mostrarMenuHotpacks(numero);
+    return;
+  }
+
+  if (opcion === "soporte") {
+    await enviarMensaje(
+      numero,
+      "👨‍💻 Un agente de RECARGAS GAMES te atenderá pronto."
+    );
+    return;
+  }
+
+  if (
+    opcion === "movistar" ||
+    opcion === "digitel" ||
+    opcion === "movilnet"
+  ) {
+    await mostrarHotpacksOperadora(numero, opcion);
+    return;
+  }
+
+  if (opcion.startsWith("ff_")) {
+    const producto = opcion.replace("ff_", "");
+
+    if (!precios[producto]) {
+      await enviarMensaje(numero, "❌ Producto no disponible.");
+      return;
+    }
+
+    usuario.producto = producto;
+    usuario.estado = "esperando_referencia";
+
+    await enviarMensaje(numero, mensajePago(producto));
+    return;
+  }
+
+  if (
+    opcion.startsWith("movistar_") ||
+    opcion.startsWith("digitel_") ||
+    opcion.startsWith("movilnet_")
+  ) {
+    await enviarMensaje(
+      numero,
+      `📱 Has seleccionado: ${opcion}\n\nUn agente te enviará el precio y los detalles del paquete.`
+    );
+  }
+}
+
+// =====================================
 // MENSAJES RECIBIDOS
-// ===============================
+// =====================================
 
 client.on("message", async (message) => {
   try {
@@ -217,13 +456,8 @@ client.on("message", async (message) => {
 
     console.log(`Mensaje recibido de ${numero}: ${texto}`);
 
-    // ===============================
-    // MENÚ PRINCIPAL
-    // ===============================
-
     if (
       textoNormalizado === "hola" ||
-      textoNormalizado === "buenas" ||
       textoNormalizado === "inicio" ||
       textoNormalizado === "menu" ||
       textoNormalizado === "menú"
@@ -233,35 +467,41 @@ client.on("message", async (message) => {
       usuario.referencia = null;
       usuario.idJugador = null;
 
-      await enviarMensaje(numero, menuPrincipal());
+      await mostrarMenuPrincipal(numero);
       return;
     }
 
-    if (texto === "1" && usuario.estado !== "esperando_id") {
-      usuario.estado = "seleccion_producto";
-
-      await enviarMensaje(numero, menuFreeFire());
+    if (message.selectedRowId) {
+      await procesarOpcion(numero, message.selectedRowId, usuario);
       return;
     }
 
-    if (texto === "2" && usuario.estado === "inicio") {
+    if (message.selectedButtonId) {
+      await procesarOpcion(numero, message.selectedButtonId, usuario);
+      return;
+    }
+
+    if (usuario.estado === "inicio" && texto === "1") {
+      await mostrarMenuFreeFire(numero);
+      return;
+    }
+
+    if (usuario.estado === "inicio" && texto === "2") {
+      await mostrarMenuHotpacks(numero);
+      return;
+    }
+
+    if (usuario.estado === "inicio" && texto === "3") {
       await enviarMensaje(
         numero,
-        "👨‍💻 Un agente de RECARGASGAMES te atenderá pronto."
+        "👨‍💻 Un agente de RECARGAS GAMES te atenderá pronto."
       );
       return;
     }
 
-    // ===============================
-    // SELECCIÓN DE PRODUCTO
-    // ===============================
-
     if (usuario.estado === "seleccion_producto") {
       if (!precios[texto]) {
-        await enviarMensaje(
-          numero,
-          "❌ Cantidad no válida.\n\n" + menuFreeFire()
-        );
+        await mostrarMenuFreeFire(numero);
         return;
       }
 
@@ -272,15 +512,11 @@ client.on("message", async (message) => {
       return;
     }
 
-    // ===============================
-    // REFERENCIA BANCARIA
-    // ===============================
-
     if (usuario.estado === "esperando_referencia") {
       if (!referenciaValida(texto)) {
         await enviarMensaje(
           numero,
-          "❌ La referencia debe tener exactamente 4 dígitos.\n\nEnvía los últimos 4 dígitos."
+          "❌ La referencia debe tener exactamente 4 dígitos."
         );
         return;
       }
@@ -301,21 +537,17 @@ Debe tener más de 6 dígitos.
       return;
     }
 
-    // ===============================
-    // ID DEL JUGADOR
-    // ===============================
-
     if (usuario.estado === "esperando_id") {
       if (!idJugadorValido(texto)) {
         await enviarMensaje(
           numero,
-          "❌ ID inválido.\n\nEnvía un ID de Free Fire con más de 6 dígitos."
+          "❌ ID inválido. Envía un ID de Free Fire con más de 6 dígitos."
         );
         return;
       }
 
       usuario.idJugador = texto;
-      usuario.estado = "verificando_pago";
+      usuario.estado = "finalizado";
 
       await enviarMensaje(
         numero,
@@ -347,19 +579,6 @@ Estado: ⏳ Verificando pago
 `
       );
 
-      usuario.estado = "finalizado";
-      return;
-    }
-
-    // ===============================
-    // ESTADOS FINALES
-    // ===============================
-
-    if (usuario.estado === "verificando_pago") {
-      await enviarMensaje(
-        numero,
-        "⏳ Tu solicitud continúa en proceso de verificación."
-      );
       return;
     }
 
@@ -371,18 +590,15 @@ Estado: ⏳ Verificando pago
       return;
     }
 
-    await enviarMensaje(
-      numero,
-      "No entendí tu mensaje.\n\nEscribe *hola* para ver el menú."
-    );
+    await mostrarMenuPrincipal(numero);
   } catch (error) {
     console.error("Error procesando mensaje:", error);
   }
 });
 
-// ===============================
+// =====================================
 // PÁGINA PRINCIPAL
-// ===============================
+// =====================================
 
 app.get("/", (req, res) => {
   res.send(`
@@ -391,82 +607,50 @@ app.get("/", (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RECARGASGAMES WhatsApp</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 30px;
-      background: #0b0b0f;
-      color: white;
-      font-family: Arial, sans-serif;
-      text-align: center;
-    }
-
-    h1 {
-      color: #ffd700;
-    }
-
-    a {
-      display: inline-block;
-      margin-top: 20px;
-      padding: 14px 25px;
-      background: #25d366;
-      color: white;
-      text-decoration: none;
-      border-radius: 10px;
-      font-weight: bold;
-    }
-  </style>
+  <title>RECARGAS GAMES</title>
 </head>
-<body>
-  <h1>RECARGASGAMES</h1>
+<body style="background:#0b0b0f;color:white;text-align:center;font-family:Arial;padding:30px;">
+  <h1 style="color:#ffd700;">RECARGAS GAMES</h1>
   <p>Bot de WhatsApp</p>
   <p>Estado: ${
     whatsappListo ? "🟢 Conectado" : "🟡 Esperando conexión"
   }</p>
-  <a href="/QR">Ver código QR</a>
+  <a href="/QR" style="color:white;background:#25d366;padding:15px;border-radius:10px;text-decoration:none;">
+    Ver código QR
+  </a>
 </body>
 </html>
   `);
 });
 
-// ===============================
-// PÁGINA QR
-// ===============================
+// =====================================
+// RUTA QR
+// =====================================
 
 app.get("/QR", async (req, res) => {
   try {
     if (whatsappListo) {
-      res.send(`
+      return res.send(`
         <html>
-        <head>
-          <title>WhatsApp conectado</title>
-        </head>
         <body style="background:#0b0b0f;color:white;text-align:center;font-family:Arial;padding:30px;">
           <h1>🟢 WhatsApp conectado</h1>
-          <p>El bot está funcionando correctamente.</p>
+          <p>RECARGAS GAMES está funcionando correctamente.</p>
         </body>
         </html>
       `);
-
-      return;
     }
 
     if (!qrActual) {
-      res.send(`
+      return res.send(`
         <html>
         <head>
           <meta http-equiv="refresh" content="5">
-          <title>Generando QR</title>
         </head>
         <body style="background:#0b0b0f;color:white;text-align:center;font-family:Arial;padding:30px;">
           <h1>⏳ Generando código QR...</h1>
-          <p>La página se actualizará automáticamente.</p>
         </body>
         </html>
       `);
-
-      return;
     }
 
     const qrImagen = await qrcode.toDataURL(qrActual);
@@ -474,17 +658,14 @@ app.get("/QR", async (req, res) => {
     res.send(`
       <html>
       <head>
-        <title>QR WhatsApp</title>
+        <title>QR RECARGAS GAMES</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="20">
       </head>
       <body style="background:#0b0b0f;color:white;text-align:center;font-family:Arial;padding:20px;">
         <h1 style="color:#ffd700;">Escanea el código QR</h1>
         <p>WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-        <img
-          src="${qrImagen}"
-          style="width:300px;max-width:90%;background:white;padding:15px;border-radius:15px;"
-        >
+        <img src="${qrImagen}" style="width:300px;max-width:90%;background:white;padding:15px;border-radius:15px;">
         <p>El código se actualizará automáticamente.</p>
       </body>
       </html>
@@ -495,17 +676,17 @@ app.get("/QR", async (req, res) => {
   }
 });
 
-// ===============================
+// =====================================
 // SERVIDOR
-// ===============================
+// =====================================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor iniciado en el puerto ${PORT}`);
   console.log(`Ruta QR: /QR`);
 });
 
-// ===============================
+// =====================================
 // INICIAR WHATSAPP
-// ===============================
+// =====================================
 
 client.initialize();
