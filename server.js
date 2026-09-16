@@ -13,7 +13,14 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+// ===============================
+// 🔐 TOKEN SECRETO (para la web)
+// ===============================
+// Este token lo usará Vercel para autenticarse con el bot
+const API_TOKEN = process.env.API_TOKEN || "recargasgames-secreto-2026-cambiar";
+
 console.log("Versión whatsapp-web.js:", packageInfo.version);
+console.log("🔐 Token API:", API_TOKEN.substring(0, 15) + "...");
 
 // ===============================
 // CONFIGURACIÓN
@@ -89,9 +96,13 @@ function obtenerUsuario(numero) {
 
 async function enviarMensaje(numero, texto) {
   try {
-    await client.sendMessage(numero, texto);
+    // Si el número no tiene @c.us, agregarlo
+    const chatId = numero.includes("@") ? numero : `${numero}@c.us`;
+    await client.sendMessage(chatId, texto);
+    return { ok: true };
   } catch (error) {
     console.error("Error enviando mensaje:", error.message);
+    return { ok: false, error: error.message };
   }
 }
 
@@ -162,7 +173,8 @@ client.on("authenticated", () => {
 });
 
 client.on("ready", () => {
-  console.log("RECARGAS GAMES conectado correctamente.");
+  console.log("✅ RECARGAS GAMES conectado correctamente.");
+  console.log("📱 Número:", client.info?.wid?.user || "desconocido");
 });
 
 client.on("auth_failure", (mensaje) => {
@@ -171,6 +183,7 @@ client.on("auth_failure", (mensaje) => {
 
 client.on("disconnected", (razon) => {
   console.log("WhatsApp desconectado:", razon);
+  app.locals.qr = null;
 });
 
 // ===============================
@@ -183,10 +196,7 @@ client.on("message", async (message) => {
 
     const idMensaje = message.id?.id;
 
-    if (
-      idMensaje &&
-      mensajesProcesados.has(idMensaje)
-    ) {
+    if (idMensaje && mensajesProcesados.has(idMensaje)) {
       return;
     }
 
@@ -265,10 +275,7 @@ Gracias por comprar en *RECARGAS GAMES*.`;
 
 📌 Revisar pago y realizar recarga.`;
 
-      await enviarMensaje(
-        "584228242411@c.us",
-        mensajeAdmin
-      );
+      await enviarMensaje("584228242411@c.us", mensajeAdmin);
 
       usuario.estado = "finalizado";
       return;
@@ -309,12 +316,7 @@ Debe tener entre 7 y 20 dígitos.`
     if (usuario.estado === "inicio") {
       if (texto === "1") {
         usuario.estado = "seleccion_producto";
-
-        await enviarMensaje(
-          numero,
-          menuRecargas()
-        );
-
+        await enviarMensaje(numero, menuRecargas());
         return;
       }
 
@@ -327,7 +329,6 @@ Envíanos el número de teléfono o el usuario que deseas consultar.
 
 Un agente revisará tu solicitud.`
         );
-
         return;
       }
 
@@ -340,7 +341,6 @@ Un agente de soporte te atenderá lo antes posible.
 
 También puedes escribir directamente tu consulta por este medio.`
         );
-
         return;
       }
 
@@ -366,7 +366,6 @@ ${menuPrincipal()}`
 
 ${menuRecargas()}`
         );
-
         return;
       }
 
@@ -398,7 +397,6 @@ ${mensajePago()}`
 
 Si deseas realizar otra operación, escribe *hola* para volver al menú principal.`
       );
-
       return;
     }
 
@@ -406,13 +404,135 @@ Si deseas realizar otra operación, escribe *hola* para volver al menú principa
     // RESPUESTA POR DEFECTO
     // ===============================
 
-    await enviarMensaje(
-      numero,
-      menuPrincipal()
-    );
+    await enviarMensaje(numero, menuPrincipal());
   } catch (error) {
     console.error("Error procesando mensaje:", error.message);
   }
+});
+
+// ===============================
+// 🌐 API PARA LA WEB (NUEVO)
+// ===============================
+
+// Middleware de autenticación
+function autenticarToken(req, res, next) {
+  const token = req.headers["x-api-token"] || req.body?.token;
+  if (token !== API_TOKEN) {
+    return res.status(401).json({ ok: false, error: "No autorizado" });
+  }
+  next();
+}
+
+// ─────────────────────────────────────────
+// POST /api/enviar → Enviar mensaje
+// ─────────────────────────────────────────
+app.post("/api/enviar", autenticarToken, async (req, res) => {
+  try {
+    const { telefono, mensaje } = req.body;
+
+    if (!telefono || !mensaje) {
+      return res.status(400).json({
+        ok: false,
+        error: "Falta telefono o mensaje",
+      });
+    }
+
+    // Verificar que el cliente esté listo
+    if (!client.info) {
+      return res.status(503).json({
+        ok: false,
+        error: "Bot no conectado a WhatsApp",
+      });
+    }
+
+    // Limpiar el número (solo dígitos)
+    const numeroLimpio = String(telefono).replace(/\D/g, "");
+
+    if (numeroLimpio.length < 10) {
+      return res.status(400).json({
+        ok: false,
+        error: "Número de teléfono inválido",
+      });
+    }
+
+    const chatId = `${numeroLimpio}@c.us`;
+    const resultado = await enviarMensaje(chatId, mensaje);
+
+    if (resultado.ok) {
+      console.log(`✅ Mensaje enviado a ${numeroLimpio}`);
+      return res.json({ ok: true, enviado: true });
+    } else {
+      return res.status(500).json({
+        ok: false,
+        error: resultado.error,
+      });
+    }
+  } catch (error) {
+    console.error("Error en /api/enviar:", error.message);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// ─────────────────────────────────────────
+// POST /api/notificar-pedido → Enviar mensaje al cliente Y al admin
+// ─────────────────────────────────────────
+app.post("/api/notificar-pedido", autenticarToken, async (req, res) => {
+  try {
+    const { telefono, mensajeCliente, mensajeAdmin } = req.body;
+
+    if (!telefono || !mensajeCliente) {
+      return res.status(400).json({
+        ok: false,
+        error: "Falta telefono o mensajeCliente",
+      });
+    }
+
+    if (!client.info) {
+      return res.status(503).json({
+        ok: false,
+        error: "Bot no conectado a WhatsApp",
+      });
+    }
+
+    const numeroLimpio = String(telefono).replace(/\D/g, "");
+    const chatCliente = `${numeroLimpio}@c.us`;
+
+    // Enviar al cliente
+    const resultadoCliente = await enviarMensaje(chatCliente, mensajeCliente);
+
+    // Enviar al admin (si hay mensaje)
+    let resultadoAdmin = { ok: true };
+    if (mensajeAdmin) {
+      resultadoAdmin = await enviarMensaje("584228242411@c.us", mensajeAdmin);
+    }
+
+    return res.json({
+      ok: resultadoCliente.ok,
+      enviadoCliente: resultadoCliente.ok,
+      enviadoAdmin: resultadoAdmin.ok,
+      errores: {
+        cliente: resultadoCliente.error || null,
+        admin: resultadoAdmin.error || null,
+      },
+    });
+  } catch (error) {
+    console.error("Error en /api/notificar-pedido:", error.message);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// ─────────────────────────────────────────
+// GET /api/status → Estado del bot
+// ─────────────────────────────────────────
+app.get("/api/status", (req, res) => {
+  const conectado = !!client.info;
+  res.json({
+    ok: true,
+    conectado: conectado,
+    numero: client.info?.wid?.user || null,
+    version: packageInfo.version,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ===============================
@@ -420,6 +540,10 @@ Si deseas realizar otra operación, escribe *hola* para volver al menú principa
 // ===============================
 
 app.get("/", (req, res) => {
+  const conectado = !!client.info;
+  const colorEstado = conectado ? "#22c55e" : "#f59e0b";
+  const textoEstado = conectado ? "Conectado ✅" : "Esperando QR";
+
   res.send(`
     <!DOCTYPE html>
     <html lang="es">
@@ -448,6 +572,17 @@ app.get("/", (req, res) => {
           color: #ffd700;
         }
 
+        .estado {
+          display: inline-block;
+          padding: 8px 16px;
+          border-radius: 20px;
+          background: ${colorEstado}20;
+          border: 1px solid ${colorEstado};
+          color: ${colorEstado};
+          font-weight: bold;
+          margin: 15px 0;
+        }
+
         a {
           display: inline-block;
           margin-top: 20px;
@@ -464,6 +599,8 @@ app.get("/", (req, res) => {
       <div class="contenedor">
         <h1>🎮 RECARGAS GAMES</h1>
         <p>Servidor de WhatsApp activo.</p>
+        <div class="estado">${textoEstado}</div>
+        <br>
         <a href="/QR">Ver código QR</a>
       </div>
     </body>
@@ -526,6 +663,7 @@ app.get("/QR", async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor activo en el puerto ${PORT}`);
   console.log(`QR disponible en /QR`);
+  console.log(`API disponible en /api/enviar, /api/notificar-pedido, /api/status`);
 });
 
 client.initialize();
