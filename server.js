@@ -26,6 +26,14 @@ let whatsappListo = false;
 
 /*
 |--------------------------------------------------------------------------
+| SESIONES DE CLIENTES
+|--------------------------------------------------------------------------
+*/
+
+const sesiones = {};
+
+/*
+|--------------------------------------------------------------------------
 | PRECIOS EN BOLÍVARES
 |--------------------------------------------------------------------------
 */
@@ -132,6 +140,19 @@ function responderNoAutorizado(res) {
   });
 }
 
+function obtenerSesion(telefono) {
+  if (!sesiones[telefono]) {
+    sesiones[telefono] = {
+      paso: "inicio",
+      producto: null,
+      monto: null,
+      referencia: null,
+    };
+  }
+
+  return sesiones[telefono];
+}
+
 function mostrarPrecios() {
   return `
 🔥 PRECIOS FREE FIRE 🔥
@@ -176,7 +197,7 @@ async function notificarAdministrador(mensaje) {
 
 /*
 |--------------------------------------------------------------------------
-| RUTAS WEB
+| RUTA PRINCIPAL
 |--------------------------------------------------------------------------
 */
 
@@ -358,7 +379,7 @@ app.get("/QR", (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| RUTAS DE LA API
+| API
 |--------------------------------------------------------------------------
 */
 
@@ -504,7 +525,7 @@ app.post("/api/alerta-web", async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| BOT DE WHATSAPP
+| CLIENTE DE WHATSAPP
 |--------------------------------------------------------------------------
 */
 
@@ -578,9 +599,116 @@ client.on("message", async (message) => {
     const textoMinuscula = texto.toLowerCase();
     const telefono = message.from.replace("@c.us", "");
 
+    const sesion = obtenerSesion(telefono);
+
     /*
     |--------------------------------------------------------------------------
-    | SALUDO
+    | SI ESTÁ ESPERANDO LA ID, PROCESAR COMO ID
+    |--------------------------------------------------------------------------
+    */
+
+    if (sesion.paso === "esperando_id") {
+      if (!/^\d{7,15}$/.test(texto)) {
+        await message.reply(`
+⚠️ El ID de jugador debe contener solamente números.
+
+Envíalo nuevamente.
+`);
+
+        return;
+      }
+
+      const pedido = {
+        numero: crearNumeroPedido(),
+        cliente: "Cliente WhatsApp",
+        telefono,
+        producto: sesion.producto || "Free Fire",
+        monto: sesion.monto || "Por confirmar",
+        referencia: sesion.referencia,
+        idJugador: texto,
+        origen: "whatsapp",
+        estado: estados.pendientes,
+        fecha: new Date().toISOString(),
+      };
+
+      const pedidos = cargarPedidos();
+
+      pedidos.push(pedido);
+      guardarPedidos(pedidos);
+
+      await message.reply(`
+✅ Datos recibidos correctamente.
+
+📦 Número de pedido: ${pedido.numero}
+🧾 Referencia: ${pedido.referencia}
+🆔 ID de jugador: ${pedido.idJugador}
+
+Tu pedido quedó registrado y será revisado por nuestro equipo.
+
+Estado: PENDIENTE
+`);
+
+      await notificarAdministrador(`
+🟡 NUEVO PEDIDO POR WHATSAPP
+
+📦 Pedido: ${pedido.numero}
+📱 Cliente: ${telefono}
+🎮 Producto: ${pedido.producto}
+💰 Monto: ${pedido.monto} Bs
+🧾 Referencia: ${pedido.referencia}
+🆔 ID Free Fire: ${pedido.idJugador}
+
+Estado: PENDIENTE
+`);
+
+      delete sesiones[telefono];
+
+      return;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | SI ESTÁ ESPERANDO LA REFERENCIA
+    |--------------------------------------------------------------------------
+    */
+
+    if (sesion.paso === "esperando_referencia") {
+      if (!/^\d{6,20}$/.test(texto)) {
+        await message.reply(`
+⚠️ Envía solamente el número de referencia del Pago Móvil.
+`);
+
+        return;
+      }
+
+      sesion.referencia = texto;
+      sesion.paso = "esperando_id";
+
+      await message.reply(`
+🧾 Referencia recibida.
+
+Ahora envía tu ID de jugador de Free Fire.
+
+Puedes encontrarlo dentro del juego, en tu perfil.
+`);
+
+      await notificarAdministrador(`
+🧾 REFERENCIA RECIBIDA
+
+📱 Cliente: ${telefono}
+🧾 Referencia: ${sesion.referencia}
+🎮 Producto: ${sesion.producto}
+💰 Monto: ${sesion.monto} Bs
+
+El cliente debe enviar ahora su ID de jugador.
+`);
+
+      return;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | SALUDOS
     |--------------------------------------------------------------------------
     */
 
@@ -645,6 +773,11 @@ Después de pagar, envía el número de referencia.
     */
 
     if (Object.prototype.hasOwnProperty.call(precios, texto)) {
+      sesion.producto = `Free Fire ${texto} diamantes`;
+      sesion.monto = precios[texto];
+      sesion.referencia = null;
+      sesion.paso = "esperando_referencia";
+
       await message.reply(`
 💎 Seleccionaste ${texto} diamantes.
 
@@ -658,141 +791,6 @@ Cédula: V-32824869
 Teléfono: 04228242411
 
 Después envía el número de referencia del pago.
-`);
-
-      return;
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | ID DE JUGADOR
-    |--------------------------------------------------------------------------
-    | Esta condición va antes de la referencia.
-    */
-
-    if (/^\d{7,15}$/.test(texto)) {
-      const pedidos = cargarPedidos();
-
-      const pedidoPendiente = pedidos
-        .slice()
-        .reverse()
-        .find(
-          (pedido) =>
-            pedido.telefono === telefono &&
-            pedido.origen === "whatsapp" &&
-            pedido.estado === estados.pendientes &&
-            pedido.referencia &&
-            pedido.referencia !== "Por confirmar" &&
-            (!pedido.idJugador ||
-              pedido.idJugador === "Por confirmar")
-        );
-
-      if (!pedidoPendiente) {
-        await message.reply(`
-No encontré una referencia pendiente para este número.
-
-Primero envía el número de referencia del Pago Móvil.
-`);
-
-        return;
-      }
-
-      pedidoPendiente.idJugador = texto;
-
-      guardarPedidos(pedidos);
-
-      await message.reply(`
-✅ Datos recibidos correctamente.
-
-📦 Número de pedido: ${pedidoPendiente.numero}
-🆔 ID de jugador: ${texto}
-
-Tu pedido quedó registrado y será revisado por nuestro equipo.
-
-Estado: PENDIENTE
-`);
-
-      await notificarAdministrador(`
-🟡 NUEVO PEDIDO POR WHATSAPP
-
-📦 Pedido: ${pedidoPendiente.numero}
-📱 Cliente: ${telefono}
-🎮 Producto: ${pedidoPendiente.producto}
-🧾 Referencia: ${pedidoPendiente.referencia}
-🆔 ID Free Fire: ${pedidoPendiente.idJugador}
-💰 Monto: ${pedidoPendiente.monto} Bs
-
-El pedido requiere revisión del pago.
-`);
-
-      return;
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | REFERENCIA DE PAGO
-    |--------------------------------------------------------------------------
-    */
-
-    if (/^\d{6,20}$/.test(texto)) {
-      const pedidos = cargarPedidos();
-
-      const pedidoExistente = pedidos
-        .slice()
-        .reverse()
-        .find(
-          (pedido) =>
-            pedido.telefono === telefono &&
-            pedido.origen === "whatsapp" &&
-            pedido.estado === estados.pendientes &&
-            pedido.referencia &&
-            pedido.referencia !== "Por confirmar" &&
-            (!pedido.idJugador ||
-              pedido.idJugador === "Por confirmar")
-        );
-
-      if (pedidoExistente) {
-        await message.reply(`
-⚠️ Ya tienes una referencia registrada.
-
-Ahora envía tu ID de jugador de Free Fire.
-`);
-
-        return;
-      }
-
-      const pedido = {
-        numero: crearNumeroPedido(),
-        cliente: "Cliente WhatsApp",
-        telefono,
-        producto: "Free Fire",
-        monto: "Por confirmar",
-        referencia: texto,
-        idJugador: "Por confirmar",
-        origen: "whatsapp",
-        estado: estados.pendientes,
-        fecha: new Date().toISOString(),
-      };
-
-      pedidos.push(pedido);
-      guardarPedidos(pedidos);
-
-      await message.reply(`
-🧾 Referencia recibida.
-
-Ahora envía tu ID de jugador de Free Fire.
-
-Puedes encontrarlo dentro del juego, en tu perfil.
-`);
-
-      await notificarAdministrador(`
-🧾 POSIBLE REFERENCIA DE PAGO
-
-📦 Pedido: ${pedido.numero}
-📱 Cliente: ${telefono}
-🧾 Referencia: ${pedido.referencia}
-
-El cliente debe enviar ahora su ID de jugador.
 `);
 
       return;
@@ -834,7 +832,7 @@ Escribe:
 
 /*
 |--------------------------------------------------------------------------
-| INICIO DEL SERVIDOR
+| INICIO
 |--------------------------------------------------------------------------
 */
 
@@ -849,7 +847,7 @@ client.initialize().catch((error) => {
 
 /*
 |--------------------------------------------------------------------------
-| ERRORES Y CIERRE
+| CONTROL DE ERRORES
 |--------------------------------------------------------------------------
 */
 
