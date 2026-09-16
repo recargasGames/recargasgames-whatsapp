@@ -24,6 +24,12 @@ const PEDIDOS_FILE = path.join(__dirname, "pedidos.json");
 let ultimoQR = null;
 let whatsappListo = false;
 
+/*
+|--------------------------------------------------------------------------
+| PRECIOS EN BOLÍVARES
+|--------------------------------------------------------------------------
+*/
+
 const precios = {
   "110": 770,
   "220": 1540,
@@ -42,14 +48,26 @@ const estados = {
   cancelado: "cancelado",
 };
 
+/*
+|--------------------------------------------------------------------------
+| FUNCIONES GENERALES
+|--------------------------------------------------------------------------
+*/
+
 function cargarPedidos() {
   try {
     if (!fs.existsSync(PEDIDOS_FILE)) {
-      fs.writeFileSync(PEDIDOS_FILE, "[]");
+      fs.writeFileSync(PEDIDOS_FILE, "[]", "utf8");
       return [];
     }
 
-    return JSON.parse(fs.readFileSync(PEDIDOS_FILE, "utf8"));
+    const contenido = fs.readFileSync(PEDIDOS_FILE, "utf8");
+
+    if (!contenido.trim()) {
+      return [];
+    }
+
+    return JSON.parse(contenido);
   } catch (error) {
     console.error("Error leyendo pedidos:", error.message);
     return [];
@@ -57,15 +75,20 @@ function cargarPedidos() {
 }
 
 function guardarPedidos(pedidos) {
-  fs.writeFileSync(
-    PEDIDOS_FILE,
-    JSON.stringify(pedidos, null, 2),
-    "utf8"
-  );
+  try {
+    fs.writeFileSync(
+      PEDIDOS_FILE,
+      JSON.stringify(pedidos, null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Error guardando pedidos:", error.message);
+  }
 }
 
 function crearNumeroPedido() {
   const fecha = new Date();
+
   const parteFecha =
     fecha.getFullYear().toString() +
     String(fecha.getMonth() + 1).padStart(2, "0") +
@@ -77,7 +100,7 @@ function crearNumeroPedido() {
 }
 
 function limpiarNumeroWhatsApp(numero) {
-  return numero.replace(/\D/g, "");
+  return String(numero || "").replace(/\D/g, "");
 }
 
 function formatoWhatsApp(numero) {
@@ -107,6 +130,24 @@ function responderNoAutorizado(res) {
     ok: false,
     error: "API key inválida o ausente",
   });
+}
+
+function mostrarPrecios() {
+  return `
+🔥 PRECIOS FREE FIRE 🔥
+
+💎110 → ${precios["110"].toLocaleString("es-VE")} Bs
+💎220 → ${precios["220"].toLocaleString("es-VE")} Bs
+💎341 → ${precios["341"].toLocaleString("es-VE")} Bs
+💎572 → ${precios["572"].toLocaleString("es-VE")} Bs
+💎1166 → ${precios["1166"].toLocaleString("es-VE")} Bs
+💎2398 → ${precios["2398"].toLocaleString("es-VE")} Bs
+💎6160 → ${precios["6160"].toLocaleString("es-VE")} Bs
+
+Escribe directamente la cantidad que deseas comprar.
+
+Ejemplo: 110
+`;
 }
 
 async function enviarWhatsApp(numero, mensaje) {
@@ -189,14 +230,20 @@ app.get("/", (req, res) => {
       <div class="card">
         <h1>RECARGASGAMES</h1>
         <p>Servidor del bot de WhatsApp funcionando.</p>
-        <a href="/qr">Abrir código QR</a>
+        <a href="/QR">Abrir código QR</a>
       </div>
     </body>
     </html>
   `);
 });
 
-app.get("/qr", (req, res) => {
+/*
+|--------------------------------------------------------------------------
+| RUTA QR
+|--------------------------------------------------------------------------
+*/
+
+app.get("/QR", (req, res) => {
   if (!ultimoQR) {
     return res.send(`
       <!DOCTYPE html>
@@ -309,6 +356,12 @@ app.get("/qr", (req, res) => {
   `);
 });
 
+/*
+|--------------------------------------------------------------------------
+| RUTAS DE LA API
+|--------------------------------------------------------------------------
+*/
+
 app.get("/api/estado", (req, res) => {
   res.json({
     ok: true,
@@ -394,6 +447,7 @@ app.post("/api/pedido-web", async (req, res) => {
     };
 
     const pedidos = cargarPedidos();
+
     pedidos.push(pedido);
     guardarPedidos(pedidos);
 
@@ -479,7 +533,7 @@ client.on("qr", async (qr) => {
     ultimoQR = await QRCode.toDataURL(qr);
 
     console.log("QR generado.");
-    console.log("Abre la ruta /qr para escanearlo.");
+    console.log("Abre la ruta /QR para escanearlo.");
 
     qrcodeTerminal.generate(qr, {
       small: true,
@@ -510,6 +564,12 @@ client.on("disconnected", (motivo) => {
   console.log("WhatsApp desconectado:", motivo);
 });
 
+/*
+|--------------------------------------------------------------------------
+| MENSAJES DE WHATSAPP
+|--------------------------------------------------------------------------
+*/
+
 client.on("message", async (message) => {
   try {
     if (message.fromMe) return;
@@ -518,10 +578,17 @@ client.on("message", async (message) => {
     const textoMinuscula = texto.toLowerCase();
     const telefono = message.from.replace("@c.us", "");
 
+    /*
+    |--------------------------------------------------------------------------
+    | SALUDO
+    |--------------------------------------------------------------------------
+    */
+
     if (
       textoMinuscula === "hola" ||
       textoMinuscula === "buenas" ||
       textoMinuscula === "buenos dias" ||
+      textoMinuscula === "buenos días" ||
       textoMinuscula === "buenas tardes" ||
       textoMinuscula === "buenas noches"
     ) {
@@ -535,27 +602,26 @@ Escribe:
 1️⃣ Ver precios
 0️⃣ Ver datos de Pago Móvil
 `);
+
       return;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | VER PRECIOS
+    |--------------------------------------------------------------------------
+    */
 
     if (texto === "1") {
-      await message.reply(`
-🔥 PRECIOS FREE FIRE 🔥
-
-💎 110 diamantes: 770 Bs
-💎 220 diamantes: 1.540 Bs
-💎 341 diamantes: 2.300 Bs
-💎 572 diamantes: 3.850 Bs
-💎 1166 diamantes: 7.150 Bs
-💎 2398 diamantes: 14.100 Bs
-💎 6160 diamantes: 35.900 Bs
-
-Escribe directamente la cantidad que deseas comprar.
-
-Ejemplo: 110
-`);
+      await message.reply(mostrarPrecios());
       return;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | DATOS DE PAGO
+    |--------------------------------------------------------------------------
+    */
 
     if (texto === "0") {
       await message.reply(`
@@ -566,16 +632,19 @@ Código: 0102
 Cédula: V-32824869
 Teléfono: 04228242411
 
-Después de pagar, envía:
-
-1. Número de referencia
-2. ID de jugador de Free Fire
-3. Cantidad de diamantes
+Después de pagar, envía el número de referencia.
 `);
+
       return;
     }
 
-    if (precios[texto]) {
+    /*
+    |--------------------------------------------------------------------------
+    | SELECCIÓN DE DIAMANTES
+    |--------------------------------------------------------------------------
+    */
+
+    if (Object.prototype.hasOwnProperty.call(precios, texto)) {
       await message.reply(`
 💎 Seleccionaste ${texto} diamantes.
 
@@ -590,10 +659,124 @@ Teléfono: 04228242411
 
 Después envía el número de referencia del pago.
 `);
+
       return;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | ID DE JUGADOR
+    |--------------------------------------------------------------------------
+    | Esta condición va antes de la referencia.
+    */
+
+    if (/^\d{7,15}$/.test(texto)) {
+      const pedidos = cargarPedidos();
+
+      const pedidoPendiente = pedidos
+        .slice()
+        .reverse()
+        .find(
+          (pedido) =>
+            pedido.telefono === telefono &&
+            pedido.origen === "whatsapp" &&
+            pedido.estado === estados.pendientes &&
+            pedido.referencia &&
+            pedido.referencia !== "Por confirmar" &&
+            (!pedido.idJugador ||
+              pedido.idJugador === "Por confirmar")
+        );
+
+      if (!pedidoPendiente) {
+        await message.reply(`
+No encontré una referencia pendiente para este número.
+
+Primero envía el número de referencia del Pago Móvil.
+`);
+
+        return;
+      }
+
+      pedidoPendiente.idJugador = texto;
+
+      guardarPedidos(pedidos);
+
+      await message.reply(`
+✅ Datos recibidos correctamente.
+
+📦 Número de pedido: ${pedidoPendiente.numero}
+🆔 ID de jugador: ${texto}
+
+Tu pedido quedó registrado y será revisado por nuestro equipo.
+
+Estado: PENDIENTE
+`);
+
+      await notificarAdministrador(`
+🟡 NUEVO PEDIDO POR WHATSAPP
+
+📦 Pedido: ${pedidoPendiente.numero}
+📱 Cliente: ${telefono}
+🎮 Producto: ${pedidoPendiente.producto}
+🧾 Referencia: ${pedidoPendiente.referencia}
+🆔 ID Free Fire: ${pedidoPendiente.idJugador}
+💰 Monto: ${pedidoPendiente.monto} Bs
+
+El pedido requiere revisión del pago.
+`);
+
+      return;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | REFERENCIA DE PAGO
+    |--------------------------------------------------------------------------
+    */
+
     if (/^\d{6,20}$/.test(texto)) {
+      const pedidos = cargarPedidos();
+
+      const pedidoExistente = pedidos
+        .slice()
+        .reverse()
+        .find(
+          (pedido) =>
+            pedido.telefono === telefono &&
+            pedido.origen === "whatsapp" &&
+            pedido.estado === estados.pendientes &&
+            pedido.referencia &&
+            pedido.referencia !== "Por confirmar" &&
+            (!pedido.idJugador ||
+              pedido.idJugador === "Por confirmar")
+        );
+
+      if (pedidoExistente) {
+        await message.reply(`
+⚠️ Ya tienes una referencia registrada.
+
+Ahora envía tu ID de jugador de Free Fire.
+`);
+
+        return;
+      }
+
+      const pedido = {
+        numero: crearNumeroPedido(),
+        cliente: "Cliente WhatsApp",
+        telefono,
+        producto: "Free Fire",
+        monto: "Por confirmar",
+        referencia: texto,
+        idJugador: "Por confirmar",
+        origen: "whatsapp",
+        estado: estados.pendientes,
+        fecha: new Date().toISOString(),
+      };
+
+      pedidos.push(pedido);
+      guardarPedidos(pedidos);
+
       await message.reply(`
 🧾 Referencia recibida.
 
@@ -605,8 +788,9 @@ Puedes encontrarlo dentro del juego, en tu perfil.
       await notificarAdministrador(`
 🧾 POSIBLE REFERENCIA DE PAGO
 
+📦 Pedido: ${pedido.numero}
 📱 Cliente: ${telefono}
-🧾 Referencia: ${texto}
+🧾 Referencia: ${pedido.referencia}
 
 El cliente debe enviar ahora su ID de jugador.
 `);
@@ -614,67 +798,26 @@ El cliente debe enviar ahora su ID de jugador.
       return;
     }
 
-    if (/^\d{7,15}$/.test(texto)) {
-      const pedido = {
-        numero: crearNumeroPedido(),
-        cliente: "Cliente WhatsApp",
-        telefono,
-        producto: "Free Fire",
-        monto: "Por confirmar",
-        referencia: "Por confirmar",
-        idJugador: texto,
-        origen: "whatsapp",
-        estado: estados.pendientes,
-        fecha: new Date().toISOString(),
-      };
-
-      const pedidos = cargarPedidos();
-      pedidos.push(pedido);
-      guardarPedidos(pedidos);
-
-      await message.reply(`
-✅ Datos recibidos.
-
-📦 Número de pedido: ${pedido.numero}
-
-Tu pedido quedó registrado y será revisado por nuestro equipo.
-
-Estado: PENDIENTE
-`);
-
-      await notificarAdministrador(`
-🟡 NUEVO PEDIDO POR WHATSAPP
-
-📦 Pedido: ${pedido.numero}
-📱 Cliente: ${telefono}
-🆔 ID Free Fire: ${pedido.idJugador}
-
-El pedido requiere revisión del pago.
-`);
-
-      return;
-    }
+    /*
+    |--------------------------------------------------------------------------
+    | PALABRAS RELACIONADAS CON PRECIOS
+    |--------------------------------------------------------------------------
+    */
 
     if (
       textoMinuscula.includes("precio") ||
       textoMinuscula.includes("precios") ||
       textoMinuscula.includes("diamantes")
     ) {
-      await message.reply(`
-🔥 PRECIOS FREE FIRE 🔥
-
-110 diamantes: 770 Bs
-220 diamantes: 1.540 Bs
-341 diamantes: 2.300 Bs
-572 diamantes: 3.850 Bs
-1166 diamantes: 7.150 Bs
-2398 diamantes: 14.100 Bs
-6160 diamantes: 35.900 Bs
-
-Escribe la cantidad que deseas.
-`);
+      await message.reply(mostrarPrecios());
       return;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | MENSAJE NO RECONOCIDO
+    |--------------------------------------------------------------------------
+    */
 
     await message.reply(`
 No entendí tu mensaje.
@@ -691,15 +834,37 @@ Escribe:
 
 /*
 |--------------------------------------------------------------------------
-| INICIO
+| INICIO DEL SERVIDOR
 |--------------------------------------------------------------------------
 */
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor ejecutándose en el puerto ${PORT}`);
-  console.log(`Ruta QR: /qr`);
+  console.log(`Ruta QR: /QR`);
 });
 
 client.initialize().catch((error) => {
   console.error("Error iniciando WhatsApp:", error);
+});
+
+/*
+|--------------------------------------------------------------------------
+| ERRORES Y CIERRE
+|--------------------------------------------------------------------------
+*/
+
+process.on("uncaughtException", (error) => {
+  console.error("Error no controlado:", error);
+});
+
+process.on("unhandledRejection", (error) => {
+  console.error("Promesa rechazada:", error);
+});
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM recibido. Cerrando servidor...");
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT recibido. Cerrando servidor...");
 });
