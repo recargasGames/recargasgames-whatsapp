@@ -1,30 +1,127 @@
+// ============================================================
+// RECARGAS GAMES - BOT PROFESIONAL DE WHATSAPP
+// Archivo: server.js
+// ============================================================
+
 const express = require("express");
 const cors = require("cors");
 const qrcode = require("qrcode");
 const qrcodeTerminal = require("qrcode-terminal");
+const fs = require("fs");
+const path = require("path");
 
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, List, Buttons } = require("whatsapp-web.js");
 const packageInfo = require("whatsapp-web.js/package.json");
 
 const app = express();
-
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 
 const PORT = process.env.PORT || 3000;
+const API_TOKEN = process.env.API_TOKEN;
 
-// ===============================
-// 🔐 TOKEN SECRETO (para la web)
-// ===============================
-// Este token lo usará Vercel para autenticarse con el bot
-const API_TOKEN = process.env.API_TOKEN || "recargasgames-secreto-2026-cambiar";
+if (!API_TOKEN) {
+  console.error("⚠️ Configura API_TOKEN en las variables de entorno.");
+}
 
-console.log("Versión whatsapp-web.js:", packageInfo.version);
-console.log("🔐 Token API:", API_TOKEN.substring(0, 15) + "...");
+// Número administrador en formato internacional, sin + ni espacios.
+const ADMIN = "584228242411";
 
-// ===============================
-// CONFIGURACIÓN
-// ===============================
+// Reinicio de conversación por inactividad.
+const INACTIVIDAD_MS = 24 * 60 * 60 * 1000;
+
+// Tiempo durante el que el bot no interrumpe una conversación humana.
+const PAUSA_HUMANA_MS = 24 * 60 * 60 * 1000;
+
+// ============================================================
+// ESTADO Y ALMACENAMIENTO
+// ============================================================
+
+const DATA_DIR = path.join(__dirname, "data");
+const STATE_FILE = path.join(DATA_DIR, "usuarios.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function cargarUsuarios() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      const datos = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+      return new Map(Object.entries(datos));
+    }
+  } catch (error) {
+    console.error("Error cargando usuarios:", error.message);
+  }
+  return new Map();
+}
+
+const usuarios = cargarUsuarios();
+
+// Guardado sencillo con escritura temporal para reducir corrupción.
+let guardadoPendiente = false;
+
+function guardarUsuarios() {
+  if (guardadoPendiente) return;
+  guardadoPendiente = true;
+
+  setTimeout(() => {
+    try {
+      const temporal = STATE_FILE + ".tmp";
+      fs.writeFileSync(
+        temporal,
+        JSON.stringify(Object.fromEntries(usuarios), null, 2),
+        "utf8"
+      );
+      fs.renameSync(temporal, STATE_FILE);
+    } catch (error) {
+      console.error("Error guardando usuarios:", error.message);
+    } finally {
+      guardadoPendiente = false;
+    }
+  }, 300);
+}
+
+function nuevoUsuario() {
+  return {
+    estado: "inicio",
+    producto: null,
+    precio: null,
+    referencia: null,
+    idJugador: null,
+    ultimaActividad: Date.now(),
+    pausaHumanaHasta: 0,
+  };
+}
+
+function obtenerUsuario(numero) {
+  if (!usuarios.has(numero)) {
+    usuarios.set(numero, nuevoUsuario());
+    guardarUsuarios();
+  }
+
+  const usuario = usuarios.get(numero);
+
+  // Si pasaron 24 horas sin actividad, reiniciar el flujo.
+  if (
+    Date.now() - (usuario.ultimaActividad || 0) >= INACTIVIDAD_MS
+  ) {
+    const pausa = usuario.pausaHumanaHasta || 0;
+    Object.assign(usuario, nuevoUsuario());
+
+    // No cancelar una pausa humana que siga vigente.
+    usuario.pausaHumanaHasta = Math.max(pausa, 0);
+  }
+
+  usuario.ultimaActividad = Date.now();
+  guardarUsuarios();
+
+  return usuario;
+}
+
+// ============================================================
+// CONFIGURACIÓN DE WHATSAPP
+// ============================================================
 
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -38,15 +135,53 @@ const client = new Client({
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
     ],
   },
 });
 
-// ===============================
+// Mensajes automáticos pendientes de identificar.
+// Evita confundir mensajes enviados por el bot con respuestas
+// manuales del administrador.
+const enviosAutomaticos = [];
+
+function registrarEnvioAutomatico(chatId, texto) {
+  enviosAutomaticos.push({
+    chatId,
+    texto,
+    tiempo: Date.now(),
+  });
+
+  while (enviosAutomaticos.length > 200) {
+    enviosAutomaticos.shift();
+  }
+}
+
+function esEnvioDelBot(chatId, texto) {
+  const ahora = Date.now();
+
+  for (let i = enviosAutomaticos.length - 1; i >= 0; i--) {
+    const item = enviosAutomaticos[i];
+
+    if (ahora - item.tiempo > 30000) {
+      enviosAutomaticos.splice(i, 1);
+      continue;
+    }
+
+    if (item.chatId === chatId && item.texto === texto) {
+      enviosAutomaticos.splice(i, 1);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+app.locals.qr = null;
+app.locals.conectado = false;
+
+// ============================================================
 // DATOS DE PAGO
-// ===============================
+// ============================================================
 
 const datosPago = {
   banco: "Banco de Venezuela",
@@ -55,9 +190,9 @@ const datosPago = {
   cedula: "32824869",
 };
 
-// ===============================
-// PRECIOS
-// ===============================
+// ============================================================
+// PRECIOS DE FREE FIRE
+// ============================================================
 
 const precios = {
   "110": 770,
@@ -69,36 +204,28 @@ const precios = {
   "6160": 35900,
 };
 
-// ===============================
-// DATOS TEMPORALES DE USUARIOS
-// ===============================
-
-const usuarios = new Map();
-const mensajesProcesados = new Set();
-
-function obtenerUsuario(numero) {
-  if (!usuarios.has(numero)) {
-    usuarios.set(numero, {
-      estado: "inicio",
-      producto: null,
-      precio: null,
-      referencia: null,
-      idJugador: null,
-    });
-  }
-
-  return usuarios.get(numero);
+function formatoBs(cantidad) {
+  return cantidad.toLocaleString("es-VE");
 }
 
-// ===============================
-// FUNCIONES DE MENSAJES
-// ===============================
+// ============================================================
+// ENVÍO DE MENSAJES
+// ============================================================
 
 async function enviarMensaje(numero, texto) {
   try {
-    // Si el número no tiene @c.us, agregarlo
-    const chatId = numero.includes("@") ? numero : `${numero}@c.us`;
+    if (!client.info) {
+      return { ok: false, error: "WhatsApp no está conectado" };
+    }
+
+    const chatId = numero.includes("@")
+      ? numero
+      : `${numero}@c.us`;
+
+    registrarEnvioAutomatico(chatId, texto);
+
     await client.sendMessage(chatId, texto);
+
     return { ok: true };
   } catch (error) {
     console.error("Error enviando mensaje:", error.message);
@@ -106,34 +233,42 @@ async function enviarMensaje(numero, texto) {
   }
 }
 
+// ============================================================
+// MENÚS
+// ============================================================
+
 function menuPrincipal() {
   return `🎮 *RECARGAS GAMES*
 
-Bienvenido a nuestra tienda de recargas y productos digitales.
+¡Bienvenido a nuestra tienda digital!
 
-¿Qué deseas hacer?
+Selecciona una opción:
 
-1️⃣ Recargas
-2️⃣ Consultar por este usuario
-3️⃣ Hablar con soporte
+1️⃣ 💎 Recargas Free Fire
+2️⃣ 🔎 Consultas
+3️⃣ 🧑‍💻 Atención al cliente
 
-Responde con el número de la opción.`;
+Escribe el número de la opción.
+
+🌐 https://recargasgames.shop`;
 }
 
 function menuRecargas() {
   return `💎 *RECARGAS FREE FIRE*
 
-Selecciona el paquete que deseas comprar:
+Selecciona tu paquete:
 
-💎 110 ➜ 770 Bs
-💎 220 ➜ 1.540 Bs
-💎 341 ➜ 2.300 Bs
-💎 572 ➜ 3.850 Bs
-💎 1166 ➜ 7.150 Bs
-💎 2398 ➜ 14.100 Bs
-💎 6160 ➜ 35.900 Bs
+1️⃣ 110 diamantes — 770 Bs
+2️⃣ 220 diamantes — 1.540 Bs
+3️⃣ 341 diamantes — 2.300 Bs
+4️⃣ 572 diamantes — 3.850 Bs
+5️⃣ 1166 diamantes — 7.150 Bs
+6️⃣ 2398 diamantes — 14.100 Bs
+7️⃣ 6160 diamantes — 35.900 Bs
 
-Escribe solamente el número del paquete.`;
+Escribe el número de la opción.
+
+También puedes escribir *menu* para volver.`;
 }
 
 function mensajePago() {
@@ -144,164 +279,238 @@ function mensajePago() {
 📱 Teléfono: ${datosPago.telefono}
 🪪 Cédula: ${datosPago.cedula}
 
-Después de realizar el pago, envía los últimos 4 dígitos de la referencia bancaria.
+Realiza el pago por Pago Móvil.
+
+Después envía los últimos 4 dígitos de la referencia bancaria.
 
 Ejemplo: 1234`;
 }
 
-function esReferenciaValida(texto) {
+function menuOpciones(texto, opciones) {
+  return new List(
+    texto,
+    "Ver opciones",
+    opciones,
+    "RECARGAS GAMES",
+    "Selecciona una opción"
+  );
+}
+
+function validarReferencia(texto) {
   return /^\d{4}$/.test(texto);
 }
 
-function esIdJugadorValido(texto) {
+function validarIdJugador(texto) {
   return /^\d{7,20}$/.test(texto);
 }
 
-// ===============================
-// EVENTOS DE WHATSAPP
-// ===============================
+function reiniciarFlujo(usuario) {
+  usuario.estado = "inicio";
+  usuario.producto = null;
+  usuario.precio = null;
+  usuario.referencia = null;
+  usuario.idJugador = null;
+  usuario.ultimaActividad = Date.now();
+  guardarUsuarios();
+}
+
+// ============================================================
+// EVENTOS DE CONEXIÓN
+// ============================================================
 
 client.on("qr", (qr) => {
-  console.log("Escanea este código QR para conectar WhatsApp:");
-  qrcodeTerminal.generate(qr, { small: true });
-
   app.locals.qr = qr;
+
+  console.log("📱 Escanea el código QR:");
+  qrcodeTerminal.generate(qr, { small: true });
 });
 
 client.on("authenticated", () => {
-  console.log("WhatsApp autenticado correctamente.");
+  console.log("🔐 WhatsApp autenticado.");
 });
 
 client.on("ready", () => {
-  console.log("✅ RECARGAS GAMES conectado correctamente.");
+  app.locals.conectado = true;
+  app.locals.qr = null;
+
+  console.log("✅ RECARGAS GAMES conectado.");
   console.log("📱 Número:", client.info?.wid?.user || "desconocido");
 });
 
 client.on("auth_failure", (mensaje) => {
-  console.error("Error de autenticación:", mensaje);
+  console.error("❌ Error de autenticación:", mensaje);
 });
 
 client.on("disconnected", (razon) => {
-  console.log("WhatsApp desconectado:", razon);
+  app.locals.conectado = false;
   app.locals.qr = null;
+
+  console.error("⚠️ WhatsApp desconectado:", razon);
 });
 
-// ===============================
-// MENSAJES RECIBIDOS
-// ===============================
+// ============================================================
+// DETECTAR RESPUESTAS MANUALES DEL ADMINISTRADOR
+// ============================================================
+
+client.on("message_create", async (message) => {
+  try {
+    if (!message.fromMe) return;
+
+    const chatId = message.to;
+    const texto = (message.body || "").trim();
+
+    if (!chatId || !chatId.endsWith("@c.us")) return;
+
+    // Ignorar mensajes que el propio bot acaba de enviar.
+    if (esEnvioDelBot(chatId, texto)) return;
+
+    const numeroAdmin = client.info?.wid?.user;
+
+    // No interpretar mensajes enviados a otros destinos
+    // como respuestas a clientes.
+    if (!numeroAdmin) return;
+
+    // Comando manual para reactivar el bot en ese chat.
+    if (texto.toLowerCase() === "!bot") {
+      const usuario = usuarios.get(chatId);
+
+      if (usuario) {
+        usuario.pausaHumanaHasta = 0;
+        usuario.estado = "inicio";
+        usuario.ultimaActividad = Date.now();
+        guardarUsuarios();
+      }
+
+      await enviarMensaje(
+        chatId,
+        "🤖 Atención automática reactivada.\n\n" + menuPrincipal()
+      );
+
+      console.log("🤖 Bot reactivado en:", chatId);
+      return;
+    }
+
+    // Cualquier otra respuesta manual pausa la automatización
+    // para ese cliente, sin afectar a los demás.
+    const usuario = obtenerUsuario(chatId);
+    usuario.pausaHumanaHasta = Date.now() + PAUSA_HUMANA_MS;
+    usuario.ultimaActividad = Date.now();
+    guardarUsuarios();
+
+    console.log("🧑‍💻 Atención manual activada para:", chatId);
+  } catch (error) {
+    console.error("Error detectando respuesta manual:", error.message);
+  }
+});
+
+// ============================================================
+// PROCESAMIENTO DE MENSAJES DE CLIENTES
+// ============================================================
 
 client.on("message", async (message) => {
   try {
     if (message.fromMe) return;
-
-    const idMensaje = message.id?.id;
-
-    if (idMensaje && mensajesProcesados.has(idMensaje)) {
-      return;
-    }
-
-    if (idMensaje) {
-      mensajesProcesados.add(idMensaje);
-
-      setTimeout(() => {
-        mensajesProcesados.delete(idMensaje);
-      }, 10 * 60 * 1000);
-    }
+    if (message.isStatus) return;
+    if (message.from.endsWith("@g.us")) return;
 
     const numero = message.from;
-    const texto = message.body.trim();
-    const textoNormalizado = texto.toLowerCase();
+    const texto = (message.body || "").trim();
+    const normalizado = texto.toLowerCase();
+
+    if (!texto) return;
 
     const usuario = obtenerUsuario(numero);
 
-    console.log(`Mensaje recibido de ${numero}: ${texto}`);
+    console.log(`📩 Mensaje de ${numero}: ${texto}`);
 
-    // ===============================
-    // VOLVER AL MENÚ PRINCIPAL
-    // ===============================
+    // No responder automáticamente mientras el administrador
+    // esté atendiendo manualmente a este cliente.
+    if (Date.now() < (usuario.pausaHumanaHasta || 0)) {
+      return;
+    }
 
-    if (
-      textoNormalizado === "hola" ||
-      textoNormalizado === "inicio" ||
-      textoNormalizado === "menu" ||
-      textoNormalizado === "menú"
-    ) {
-      usuario.estado = "inicio";
-      usuario.producto = null;
-      usuario.precio = null;
-      usuario.referencia = null;
-      usuario.idJugador = null;
+    // Si la pausa ya venció, liberar la atención automática.
+    if (usuario.pausaHumanaHasta) {
+      usuario.pausaHumanaHasta = 0;
+      guardarUsuarios();
+    }
 
+    // Volver al menú.
+    if (["hola", "inicio", "menu", "menú"].includes(normalizado)) {
+      reiniciarFlujo(usuario);
       await enviarMensaje(numero, menuPrincipal());
       return;
     }
 
-    // ===============================
+    // --------------------------------------------------------
     // ESPERANDO ID DEL JUGADOR
-    // ===============================
+    // --------------------------------------------------------
 
     if (usuario.estado === "esperando_id") {
-      if (!esIdJugadorValido(texto)) {
+      if (!validarIdJugador(texto)) {
         await enviarMensaje(
           numero,
-          "❌ El ID del jugador no es válido.\n\nEnvía un ID numérico de 7 a 20 dígitos."
+          "❌ El ID no parece válido.\n\n" +
+          "Envía el ID numérico de tu cuenta de Free Fire, " +
+          "de 7 a 20 dígitos."
         );
         return;
       }
 
       usuario.idJugador = texto;
+      usuario.estado = "finalizado";
+      usuario.ultimaActividad = Date.now();
+      guardarUsuarios();
 
-      const resumen = `✅ *DATOS RECIBIDOS*
+      const resumen = `✅ *SOLICITUD RECIBIDA*
 
 🎮 Producto: ${usuario.producto} diamantes
-💰 Precio: ${usuario.precio.toLocaleString("es-VE")} Bs
+💰 Total: ${formatoBs(usuario.precio)} Bs
 🧾 Referencia: ${usuario.referencia}
 🆔 ID del jugador: ${usuario.idJugador}
 
-⏳ Tu solicitud será revisada y procesada.
+⏳ Tu pago y solicitud deben verificarse antes de completar la recarga.
 
 Gracias por comprar en *RECARGAS GAMES*.`;
-
-      await enviarMensaje(numero, resumen);
 
       const mensajeAdmin = `🛒 *NUEVA SOLICITUD DE RECARGA*
 
 👤 Cliente: ${numero}
-
-💎 Producto: ${usuario.producto} diamantes
-💰 Precio: ${usuario.precio.toLocaleString("es-VE")} Bs
+💎 Paquete: ${usuario.producto} diamantes
+💰 Total: ${formatoBs(usuario.precio)} Bs
 🧾 Referencia: ${usuario.referencia}
-🆔 ID del jugador: ${usuario.idJugador}
+🆔 ID: ${usuario.idJugador}
 
-📌 Revisar pago y realizar recarga.`;
+📌 Verificar el pago y procesar el pedido.`;
 
-      await enviarMensaje("584228242411@c.us", mensajeAdmin);
-
-      usuario.estado = "finalizado";
+      await enviarMensaje(numero, resumen);
+      await enviarMensaje(`${ADMIN}@c.us`, mensajeAdmin);
       return;
     }
 
-    // ===============================
+    // --------------------------------------------------------
     // ESPERANDO REFERENCIA
-    // ===============================
+    // --------------------------------------------------------
 
     if (usuario.estado === "esperando_referencia") {
-      if (!esReferenciaValida(texto)) {
+      if (!validarReferencia(texto)) {
         await enviarMensaje(
           numero,
-          "❌ La referencia debe tener exactamente 4 dígitos.\n\nEjemplo: 1234"
+          "❌ La referencia debe tener exactamente 4 dígitos.\n\n" +
+          "Ejemplo: 1234"
         );
         return;
       }
 
       usuario.referencia = texto;
       usuario.estado = "esperando_id";
+      guardarUsuarios();
 
       await enviarMensaje(
         numero,
-        `✅ Referencia recibida: ${texto}
+        `✅ Referencia recibida.
 
-Ahora envía tu ID de jugador de Free Fire.
+Ahora envía tu *ID de jugador de Free Fire*.
 
 Debe tener entre 7 y 20 dígitos.`
       );
@@ -309,76 +518,119 @@ Debe tener entre 7 y 20 dígitos.`
       return;
     }
 
-    // ===============================
+    // --------------------------------------------------------
     // MENÚ PRINCIPAL
-    // ===============================
+    // --------------------------------------------------------
 
     if (usuario.estado === "inicio") {
       if (texto === "1") {
         usuario.estado = "seleccion_producto";
-        await enviarMensaje(numero, menuRecargas());
+        guardarUsuarios();
+
+        // Intentar mostrar una lista interactiva.
+        // Si WhatsApp no la admite, usar el menú numerado.
+        try {
+          const lista = menuOpciones(
+            "💎 Selecciona el paquete que deseas comprar.",
+            [
+              { id: "110", title: "110 diamantes", description: "770 Bs" },
+              { id: "220", title: "220 diamantes", description: "1.540 Bs" },
+              { id: "341", title: "341 diamantes", description: "2.300 Bs" },
+              { id: "572", title: "572 diamantes", description: "3.850 Bs" },
+              { id: "1166", title: "1166 diamantes", description: "7.150 Bs" },
+              { id: "2398", title: "2398 diamantes", description: "14.100 Bs" },
+              { id: "6160", title: "6160 diamantes", description: "35.900 Bs" },
+            ]
+          );
+
+          registrarEnvioAutomatico(numero, lista);
+          await client.sendMessage(numero, lista);
+        } catch (error) {
+          await enviarMensaje(numero, menuRecargas());
+        }
+
         return;
       }
 
       if (texto === "2") {
+        usuario.estado = "consulta";
+        guardarUsuarios();
+
         await enviarMensaje(
           numero,
-          `🔎 *CONSULTAR POR ESTE USUARIO*
-
-Envíanos el número de teléfono o el usuario que deseas consultar.
-
-Un agente revisará tu solicitud.`
+          "🔎 *CONSULTAS*\n\n" +
+          "Escribe tu número de pedido o explica qué deseas consultar.\n\n" +
+          "Si necesitas atención humana, escribe *soporte*."
         );
         return;
       }
 
-      if (texto === "3") {
+      if (texto === "3" || normalizado === "soporte") {
+        usuario.estado = "soporte";
+        guardarUsuarios();
+
         await enviarMensaje(
           numero,
-          `🧑‍💻 *SOPORTE RECARGAS GAMES*
-
-Un agente de soporte te atenderá lo antes posible.
-
-También puedes escribir directamente tu consulta por este medio.`
+          "🧑‍💻 *ATENCIÓN AL CLIENTE*\n\n" +
+          "Tu solicitud será comunicada al administrador.\n\n" +
+          "También puedes escribir tu consulta aquí."
         );
+
+        await enviarMensaje(
+          `${ADMIN}@c.us`,
+          `🧑‍💻 *SOLICITUD DE SOPORTE*\n\nCliente: ${numero}\nMensaje: solicita atención humana.`
+        );
+
+        // La atención manual debe detener las respuestas automáticas.
+        usuario.pausaHumanaHasta = Date.now() + PAUSA_HUMANA_MS;
+        guardarUsuarios();
         return;
       }
 
-      await enviarMensaje(
-        numero,
-        `❌ Opción no válida.
-
-${menuPrincipal()}`
-      );
-
+      await enviarMensaje(numero, menuPrincipal());
       return;
     }
 
-    // ===============================
-    // SELECCIÓN DEL PRODUCTO
-    // ===============================
+    // --------------------------------------------------------
+    // SELECCIÓN DEL PAQUETE
+    // --------------------------------------------------------
 
     if (usuario.estado === "seleccion_producto") {
-      if (!Object.prototype.hasOwnProperty.call(precios, texto)) {
-        await enviarMensaje(
-          numero,
-          `❌ Paquete no válido.
+      let producto = texto;
 
-${menuRecargas()}`
-        );
+      // Admitir número de opción o ID del paquete.
+      const opciones = {
+        "1": "110",
+        "2": "220",
+        "3": "341",
+        "4": "572",
+        "5": "1166",
+        "6": "2398",
+        "7": "6160",
+      };
+
+      if (opciones[texto]) {
+        producto = opciones[texto];
+      }
+
+      // Las respuestas de listas interactivas pueden llegar
+      // como el ID seleccionado.
+      if (!Object.prototype.hasOwnProperty.call(precios, producto)) {
+        await enviarMensaje(numero, menuRecargas());
         return;
       }
 
-      usuario.producto = texto;
-      usuario.precio = precios[texto];
+      usuario.producto = producto;
+      usuario.precio = precios[producto];
       usuario.estado = "esperando_referencia";
+      guardarUsuarios();
 
       await enviarMensaje(
         numero,
-        `💎 *RECARGA SELECCIONADA*
+        `💎 *PAQUETE SELECCIONADO*
 
-Paquete: ${texto} diamantes
-Precio: ${precios[texto].toLocaleString("es-VE")} Bs
+Diamantes: ${producto}
+Precio: ${formatoBs(precios[producto])} Bs
 
 ${mensajePago()}`
       );
@@ -386,58 +638,102 @@ ${mensajePago()}`
       return;
     }
 
-    // ===============================
+    // --------------------------------------------------------
+    // CONSULTAS Y SOPORTE
+    // --------------------------------------------------------
+
+    if (usuario.estado === "consulta") {
+      await enviarMensaje(
+        `${ADMIN}@c.us`,
+        `🔎 *CONSULTA DE CLIENTE*\n\nCliente: ${numero}\nMensaje: ${texto}`
+      );
+
+      await enviarMensaje(
+        numero,
+        "✅ Tu consulta fue enviada al administrador."
+      );
+
+      usuario.pausaHumanaHasta = Date.now() + PAUSA_HUMANA_MS;
+      guardarUsuarios();
+      return;
+    }
+
+    if (usuario.estado === "soporte") {
+      await enviarMensaje(
+        `${ADMIN}@c.us`,
+        `🧑‍💻 *MENSAJE DE SOPORTE*\n\nCliente: ${numero}\nMensaje: ${texto}`
+      );
+
+      await enviarMensaje(
+        numero,
+        "✅ Tu mensaje fue enviado al administrador. " +
+        "No recibirás respuestas automáticas mientras se atiende tu caso."
+      );
+
+      usuario.pausaHumanaHasta = Date.now() + PAUSA_HUMANA_MS;
+      guardarUsuarios();
+      return;
+    }
+
+    // --------------------------------------------------------
     // SOLICITUD FINALIZADA
-    // ===============================
+    // --------------------------------------------------------
 
     if (usuario.estado === "finalizado") {
       await enviarMensaje(
         numero,
-        `✅ Ya recibimos tu solicitud.
-
-Si deseas realizar otra operación, escribe *hola* para volver al menú principal.`
+        "✅ Ya recibimos tu solicitud.\n\n" +
+        "Para realizar otra compra, escribe *menu*."
       );
       return;
     }
 
-    // ===============================
-    // RESPUESTA POR DEFECTO
-    // ===============================
-
     await enviarMensaje(numero, menuPrincipal());
   } catch (error) {
-    console.error("Error procesando mensaje:", error.message);
+    console.error("❌ Error procesando mensaje:", error);
   }
 });
 
-// ===============================
-// 🌐 API PARA LA WEB (NUEVO)
-// ===============================
+// ============================================================
+// API PARA LA PÁGINA WEB
+// ============================================================
 
-// Middleware de autenticación
 function autenticarToken(req, res, next) {
-  const token = req.headers["x-api-token"] || req.body?.token;
-  if (token !== API_TOKEN) {
-    return res.status(401).json({ ok: false, error: "No autorizado" });
+  if (!API_TOKEN) {
+    return res.status(503).json({
+      ok: false,
+      error: "API_TOKEN no está configurado",
+    });
   }
+
+  const token = req.headers["x-api-token"] || req.body?.token;
+
+  if (token !== API_TOKEN) {
+    return res.status(401).json({
+      ok: false,
+      error: "No autorizado",
+    });
+  }
+
   next();
 }
 
-// ─────────────────────────────────────────
-// POST /api/enviar → Enviar mensaje
-// ─────────────────────────────────────────
+function normalizarTelefono(telefono) {
+  return String(telefono || "").replace(/\D/g, "");
+}
+
+// POST /api/enviar
 app.post("/api/enviar", autenticarToken, async (req, res) => {
   try {
     const { telefono, mensaje } = req.body;
 
-    if (!telefono || !mensaje) {
+    if (!telefono || typeof mensaje !== "string" || !mensaje.trim()) {
       return res.status(400).json({
         ok: false,
         error: "Falta telefono o mensaje",
       });
     }
 
-    // Verificar que el cliente esté listo
     if (!client.info) {
       return res.status(503).json({
         ok: false,
@@ -445,225 +741,251 @@ app.post("/api/enviar", autenticarToken, async (req, res) => {
       });
     }
 
-    // Limpiar el número (solo dígitos)
-    const numeroLimpio = String(telefono).replace(/\D/g, "");
+    const numero = normalizarTelefono(telefono);
 
-    if (numeroLimpio.length < 10) {
+    if (numero.length < 10 || numero.length > 15) {
       return res.status(400).json({
         ok: false,
         error: "Número de teléfono inválido",
       });
     }
 
-    const chatId = `${numeroLimpio}@c.us`;
-    const resultado = await enviarMensaje(chatId, mensaje);
+    const resultado = await enviarMensaje(
+      `${numero}@c.us`,
+      mensaje.trim()
+    );
 
-    if (resultado.ok) {
-      console.log(`✅ Mensaje enviado a ${numeroLimpio}`);
-      return res.json({ ok: true, enviado: true });
-    } else {
-      return res.status(500).json({
-        ok: false,
-        error: resultado.error,
-      });
-    }
+    return res.status(resultado.ok ? 200 : 500).json(resultado);
   } catch (error) {
     console.error("Error en /api/enviar:", error.message);
-    return res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-// ─────────────────────────────────────────
-// POST /api/notificar-pedido → Enviar mensaje al cliente Y al admin
-// ─────────────────────────────────────────
-app.post("/api/notificar-pedido", autenticarToken, async (req, res) => {
-  try {
-    const { telefono, mensajeCliente, mensajeAdmin } = req.body;
-
-    if (!telefono || !mensajeCliente) {
-      return res.status(400).json({
-        ok: false,
-        error: "Falta telefono o mensajeCliente",
-      });
-    }
-
-    if (!client.info) {
-      return res.status(503).json({
-        ok: false,
-        error: "Bot no conectado a WhatsApp",
-      });
-    }
-
-    const numeroLimpio = String(telefono).replace(/\D/g, "");
-    const chatCliente = `${numeroLimpio}@c.us`;
-
-    // Enviar al cliente
-    const resultadoCliente = await enviarMensaje(chatCliente, mensajeCliente);
-
-    // Enviar al admin (si hay mensaje)
-    let resultadoAdmin = { ok: true };
-    if (mensajeAdmin) {
-      resultadoAdmin = await enviarMensaje("584228242411@c.us", mensajeAdmin);
-    }
-
-    return res.json({
-      ok: resultadoCliente.ok,
-      enviadoCliente: resultadoCliente.ok,
-      enviadoAdmin: resultadoAdmin.ok,
-      errores: {
-        cliente: resultadoCliente.error || null,
-        admin: resultadoAdmin.error || null,
-      },
+    return res.status(500).json({
+      ok: false,
+      error: "Error interno al enviar mensaje",
     });
-  } catch (error) {
-    console.error("Error en /api/notificar-pedido:", error.message);
-    return res.status(500).json({ ok: false, error: error.message });
   }
 });
 
-// ─────────────────────────────────────────
-// GET /api/status → Estado del bot
-// ─────────────────────────────────────────
+// POST /api/notificar-pedido
+app.post(
+  "/api/notificar-pedido",
+  autenticarToken,
+  async (req, res) => {
+    try {
+      const { telefono, mensajeCliente, mensajeAdmin } = req.body;
+
+      if (!telefono || !mensajeCliente) {
+        return res.status(400).json({
+          ok: false,
+          error: "Falta telefono o mensajeCliente",
+        });
+      }
+
+      if (!client.info) {
+        return res.status(503).json({
+          ok: false,
+          error: "Bot no conectado a WhatsApp",
+        });
+      }
+
+      const numero = normalizarTelefono(telefono);
+
+      if (numero.length < 10 || numero.length > 15) {
+        return res.status(400).json({
+          ok: false,
+          error: "Número de teléfono inválido",
+        });
+      }
+
+      const resultadoCliente = await enviarMensaje(
+        `${numero}@c.us`,
+        mensajeCliente
+      );
+
+      let resultadoAdmin = { ok: true };
+
+      if (mensajeAdmin) {
+        resultadoAdmin = await enviarMensaje(
+          `${ADMIN}@c.us`,
+          mensajeAdmin
+        );
+      }
+
+      return res.json({
+        ok: resultadoCliente.ok && resultadoAdmin.ok,
+        enviadoCliente: resultadoCliente.ok,
+        enviadoAdmin: resultadoAdmin.ok,
+        errores: {
+          cliente: resultadoCliente.error || null,
+          admin: resultadoAdmin.error || null,
+        },
+      });
+    } catch (error) {
+      console.error("Error en /api/notificar-pedido:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        error: "Error interno al notificar el pedido",
+      });
+    }
+  }
+);
+
+// POST /api/reactivar
+// Permite que la web reactive la atención automática de un cliente.
+app.post("/api/reactivar", autenticarToken, (req, res) => {
+  const numero = normalizarTelefono(req.body?.telefono);
+
+  if (numero.length < 10 || numero.length > 15) {
+    return res.status(400).json({
+      ok: false,
+      error: "Número de teléfono inválido",
+    });
+  }
+
+  const chatId = `${numero}@c.us`;
+  const usuario = usuarios.get(chatId);
+
+  if (usuario) {
+    usuario.pausaHumanaHasta = 0;
+    usuario.estado = "inicio";
+    usuario.ultimaActividad = Date.now();
+    guardarUsuarios();
+  }
+
+  return res.json({
+    ok: true,
+    mensaje: "Atención automática reactivada",
+  });
+});
+
+// GET /api/status
 app.get("/api/status", (req, res) => {
-  const conectado = !!client.info;
   res.json({
     ok: true,
-    conectado: conectado,
+    conectado: !!client.info,
     numero: client.info?.wid?.user || null,
     version: packageInfo.version,
     timestamp: new Date().toISOString(),
   });
 });
 
-// ===============================
-// PÁGINA PRINCIPAL
-// ===============================
+// ============================================================
+// PANEL PRINCIPAL
+// ============================================================
 
 app.get("/", (req, res) => {
   const conectado = !!client.info;
-  const colorEstado = conectado ? "#22c55e" : "#f59e0b";
-  const textoEstado = conectado ? "Conectado ✅" : "Esperando QR";
+  const color = conectado ? "#22c55e" : "#f59e0b";
 
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>RECARGAS GAMES - WhatsApp</title>
-      <style>
-        body {
-          margin: 0;
-          min-height: 100vh;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #080808;
-          color: white;
-          font-family: Arial, sans-serif;
-          text-align: center;
-        }
-
-        .contenedor {
-          padding: 30px;
-        }
-
-        h1 {
-          color: #ffd700;
-        }
-
-        .estado {
-          display: inline-block;
-          padding: 8px 16px;
-          border-radius: 20px;
-          background: ${colorEstado}20;
-          border: 1px solid ${colorEstado};
-          color: ${colorEstado};
-          font-weight: bold;
-          margin: 15px 0;
-        }
-
-        a {
-          display: inline-block;
-          margin-top: 20px;
-          padding: 14px 25px;
-          border-radius: 8px;
-          background: #ffd700;
-          color: #000;
-          text-decoration: none;
-          font-weight: bold;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="contenedor">
-        <h1>🎮 RECARGAS GAMES</h1>
-        <p>Servidor de WhatsApp activo.</p>
-        <div class="estado">${textoEstado}</div>
-        <br>
-        <a href="/QR">Ver código QR</a>
-      </div>
-    </body>
-    </html>
-  `);
+  res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RECARGAS GAMES - Bot</title>
+<style>
+body{margin:0;background:#080808;color:white;font-family:Arial,sans-serif;
+display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}
+main{padding:30px;max-width:420px}
+h1{color:#ffd700}
+.estado{display:inline-block;padding:10px 18px;border:1px solid ${color};
+color:${color};border-radius:30px;margin:15px 0}
+a{display:inline-block;background:#ffd700;color:#000;padding:14px 22px;
+border-radius:9px;text-decoration:none;font-weight:bold;margin:8px}
+p{line-height:1.6;color:#ddd}
+</style>
+</head>
+<body><main>
+<h1>🎮 RECARGAS GAMES</h1>
+<p>Panel de atención automática de WhatsApp.</p>
+<div class="estado">${conectado ? "Conectado ✅" : "Esperando conexión ⚠️"}</div>
+<br><a href="/QR">Ver código QR</a>
+</main></body></html>`);
 });
 
-// ===============================
-// PÁGINA DEL QR
-// ===============================
+// ============================================================
+// PÁGINA QR
+// ============================================================
 
 app.get("/QR", async (req, res) => {
   try {
-    if (!app.locals.qr) {
-      return res.send(`
-        <!DOCTYPE html>
-        <html lang="es">
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>QR WhatsApp</title>
-        </head>
-        <body style="background:#080808;color:white;text-align:center;font-family:Arial;padding:30px;">
-          <h2>Esperando código QR...</h2>
-          <p>Actualiza esta página en unos segundos.</p>
-          <meta http-equiv="refresh" content="5">
-        </body>
-        </html>
-      `);
+    if (client.info) {
+      return res.send(
+        "<h2 style='font-family:Arial;text-align:center'>" +
+        "WhatsApp ya está conectado ✅</h2>"
+      );
     }
 
-    const qrImagen = await qrcode.toDataURL(app.locals.qr);
+    if (!app.locals.qr) {
+      return res.send(`<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="5">
+<title>Esperando QR</title></head>
+<body style="background:#080808;color:white;text-align:center;font-family:Arial;padding:30px">
+<h2>Esperando código QR...</h2>
+<p>Esta página se actualizará automáticamente.</p>
+</body></html>`);
+    }
 
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="es">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Escanear QR - RECARGAS GAMES</title>
-      </head>
-      <body style="background:#080808;color:white;text-align:center;font-family:Arial;padding:20px;">
-        <h2>📱 Escanea el código QR</h2>
-        <p>Abre WhatsApp en tu teléfono y escanea este código.</p>
-        <img src="${qrImagen}" style="max-width:100%;width:350px;background:white;padding:10px;border-radius:10px;">
-        <p>La página se actualizará automáticamente.</p>
-        <meta http-equiv="refresh" content="10">
-      </body>
-      </html>
-    `);
+    const imagen = await qrcode.toDataURL(app.locals.qr);
+
+    res.send(`<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QR - RECARGAS GAMES</title>
+</head>
+<body style="background:#080808;color:white;text-align:center;font-family:Arial;padding:20px">
+<h2>📱 Conectar WhatsApp</h2>
+<p>Escanea el código desde Dispositivos vinculados en WhatsApp.</p>
+<img src="${imagen}" alt="Código QR de WhatsApp"
+style="max-width:90%;width:350px;background:white;padding:10px;border-radius:12px">
+<p>La página se actualizará automáticamente.</p>
+<meta http-equiv="refresh" content="20">
+</body></html>`);
   } catch (error) {
-    res.status(500).send("Error generando el código QR.");
+    console.error("Error generando QR:", error.message);
+    res.status(500).send("No se pudo generar el código QR.");
   }
 });
 
-// ===============================
+// ============================================================
 // INICIAR SERVIDOR
-// ===============================
+// ============================================================
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor activo en el puerto ${PORT}`);
-  console.log(`QR disponible en /QR`);
-  console.log(`API disponible en /api/enviar, /api/notificar-pedido, /api/status`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Servidor activo en puerto ${PORT}`);
+  console.log("🔗 Panel: /");
+  console.log("📱 QR: /QR");
+  console.log("🔌 API: /api/enviar");
+  console.log("🔌 API: /api/notificar-pedido");
+  console.log("🔌 API: /api/reactivar");
+  console.log("🔌 API: /api/status");
 });
 
-client.initialize();
+server.requestTimeout = 30000;
+server.headersTimeout = 35000;
+
+client.initialize().catch((error) => {
+  console.error("Error inicializando WhatsApp:", error.message);
+});
+
+// Cierre ordenado del proceso.
+async function cerrarServidor() {
+  console.log("Cerrando servidor y cliente de WhatsApp...");
+
+  server.close();
+
+  try {
+    await client.destroy();
+  } catch (error) {
+    console.error("Error cerrando WhatsApp:", error.message);
+  }
+
+  process.exit(0);
+}
+
+process.on("SIGINT", cerrarServidor);
+process.on("SIGTERM", cerrarServidor);
